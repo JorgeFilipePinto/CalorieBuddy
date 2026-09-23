@@ -22,7 +22,7 @@ struct CatalogPickerView: View {
 
     private var scaledCalories: Int? {
         guard let selectedItem, let quantity else { return nil }
-        return Int((Double(selectedItem.calories) * quantity).rounded())
+        return selectedItem.scaledCalories(quantity: quantity)
     }
 
     var body: some View {
@@ -48,7 +48,7 @@ struct CatalogPickerView: View {
                 if let selectedItem {
                     Section("Quantidade") {
                         HStack {
-                            Text("Porções (\(selectedItem.servingLabel))")
+                            Text("Doses (\(selectedItem.doseLabel))")
                             Spacer()
                             TextField("1", text: $quantityText)
                                 .keyboardType(.decimalPad)

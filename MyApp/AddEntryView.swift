@@ -6,7 +6,6 @@ struct AddEntryView: View {
 
     let entryToEdit: FoodEntry?
     let defaultDate: Date
-    let startWithScanner: Bool
 
     @State private var name = ""
     @State private var caloriesText = ""
@@ -21,10 +20,9 @@ struct AddEntryView: View {
     @State private var saveToCatalog = false
     @State private var showScanner = false
 
-    init(entryToEdit: FoodEntry? = nil, defaultDate: Date = .now, startWithScanner: Bool = false) {
+    init(entryToEdit: FoodEntry? = nil, defaultDate: Date = .now) {
         self.entryToEdit = entryToEdit
         self.defaultDate = defaultDate
-        self.startWithScanner = startWithScanner
         _mealType = State(initialValue: MealType.suggested(for: defaultDate))
     }
 
@@ -103,9 +101,6 @@ struct AddEntryView: View {
     private func populateIfEditing() {
         guard let entry = entryToEdit else {
             date = defaultDate
-            if startWithScanner {
-                showScanner = true
-            }
             return
         }
         name = entry.name
@@ -124,10 +119,10 @@ struct AddEntryView: View {
         if let match = store.foodItem(forBarcode: code) {
             matchedFoodItemID = match.id
             name = match.name
-            caloriesText = String(match.calories)
-            proteinText = match.protein.map { String($0) } ?? ""
-            carbsText = match.carbs.map { String($0) } ?? ""
-            fatText = match.fat.map { String($0) } ?? ""
+            caloriesText = String(match.scaledCalories(quantity: 1))
+            proteinText = match.scaledProtein(quantity: 1).map { String($0) } ?? ""
+            carbsText = match.scaledCarbs(quantity: 1).map { String($0) } ?? ""
+            fatText = match.scaledFat(quantity: 1).map { String($0) } ?? ""
             saveToCatalog = false
         } else {
             matchedFoodItemID = nil
@@ -164,12 +159,14 @@ struct AddEntryView: View {
         if saveToCatalog, matchedFoodItemID == nil, let barcode {
             store.addFoodItem(FoodItem(
                 name: trimmedName,
+                unit: .unit,
+                doseSize: 1,
+                nutritionBasis: .perDose,
                 calories: calories,
                 protein: protein,
                 carbs: carbs,
                 fat: fat,
-                servingLabel: "1 porção",
-                barcode: barcode
+                barcodes: [barcode]
             ))
         }
 

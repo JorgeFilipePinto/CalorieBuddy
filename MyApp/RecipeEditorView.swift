@@ -21,9 +21,19 @@ struct RecipeEditorView: View {
     private var totalCalories: Int {
         items.reduce(0) { partial, item in
             guard let food = store.foodItems.first(where: { $0.id == item.foodItemID }) else { return partial }
-            return partial + Int((Double(food.calories) * item.quantity).rounded())
+            return partial + food.scaledCalories(quantity: item.quantity)
         }
     }
+
+    private var totalCost: Double {
+        items.reduce(0) { partial, item in
+            guard let food = store.foodItems.first(where: { $0.id == item.foodItemID }),
+                  let itemCost = store.cost(for: food, quantity: item.quantity) else { return partial }
+            return partial + itemCost
+        }
+    }
+
+    private var currencyCode: String { Locale.current.currency?.identifier ?? "EUR" }
 
     var body: some View {
         NavigationStack {
@@ -38,12 +48,17 @@ struct RecipeEditorView: View {
                             HStack {
                                 VStack(alignment: .leading) {
                                     Text(food.name)
-                                    Text("\(quantityLabel(item.quantity)) × \(food.servingLabel)")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
+                                    HStack(spacing: 4) {
+                                        Text("\(quantityLabel(item.quantity)) × \(food.doseLabel)")
+                                        if let itemCost = store.cost(for: food, quantity: item.quantity) {
+                                            Text("· \(itemCost.formatted(.currency(code: currencyCode)))")
+                                        }
+                                    }
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
                                 }
                                 Spacer()
-                                Text("\(Int((Double(food.calories) * item.quantity).rounded())) kcal")
+                                Text("\(food.scaledCalories(quantity: item.quantity)) kcal")
                                     .foregroundStyle(.secondary)
                             }
                         }
@@ -62,7 +77,7 @@ struct RecipeEditorView: View {
                     if store.foodItems.isEmpty {
                         Text("Cria primeiro alimentos no catálogo.")
                     } else if !items.isEmpty {
-                        Text("Total: \(totalCalories) kcal")
+                        Text("Total: \(totalCalories) kcal" + (totalCost > 0 ? " · \(totalCost.formatted(.currency(code: currencyCode)))" : ""))
                     }
                 }
             }
@@ -101,7 +116,9 @@ struct RecipeEditorView: View {
         let recipe = Recipe(
             id: recipeToEdit?.id ?? UUID(),
             name: name.trimmingCharacters(in: .whitespaces),
-            items: items
+            items: items,
+            isFavorite: recipeToEdit?.isFavorite ?? false,
+            createdAt: recipeToEdit?.createdAt ?? Date()
         )
         if recipeToEdit == nil {
             store.addRecipe(recipe)
@@ -122,6 +139,7 @@ private struct RecipeComponentPickerView: View {
 
     @State private var selectedFoodID: UUID?
     @State private var quantityText = "1"
+    @State private var showingNewFoodItem = false
 
     private var availableFoods: [FoodItem] {
         store.foodItems.filter { !existingFoodIDs.contains($0.id) }
@@ -134,19 +152,31 @@ private struct RecipeComponentPickerView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Picker("Alimento", selection: $selectedFoodID) {
-                    Text("Escolhe...").tag(UUID?.none)
-                    ForEach(availableFoods) { food in
-                        Text(food.name).tag(Optional(food.id))
+                Section {
+                    Picker("Alimento", selection: $selectedFoodID) {
+                        Text("Escolhe...").tag(UUID?.none)
+                        ForEach(availableFoods) { food in
+                            Text(food.name).tag(Optional(food.id))
+                        }
+                    }
+                    HStack {
+                        Text("Quantidade")
+                        Spacer()
+                        TextField("1", text: $quantityText)
+                            .keyboardType(.decimalPad)
+                            .multilineTextAlignment(.trailing)
+                            .frame(width: 80)
                     }
                 }
-                HStack {
-                    Text("Quantidade")
-                    Spacer()
-                    TextField("1", text: $quantityText)
-                        .keyboardType(.decimalPad)
-                        .multilineTextAlignment(.trailing)
-                        .frame(width: 80)
+
+                Section {
+                    Button {
+                        showingNewFoodItem = true
+                    } label: {
+                        Label("Criar Novo Alimento", systemImage: "plus.circle")
+                    }
+                } footer: {
+                    Text("O novo alimento fica guardado no catálogo e é adicionado à receita automaticamente.")
                 }
             }
             .navigationTitle("Adicionar Alimento")
@@ -162,6 +192,12 @@ private struct RecipeComponentPickerView: View {
                         dismiss()
                     }
                     .disabled(selectedFoodID == nil || quantity == nil)
+                }
+            }
+            .sheet(isPresented: $showingNewFoodItem) {
+                FoodItemEditorView { newItem in
+                    onAdd(newItem.id, 1)
+                    dismiss()
                 }
             }
         }

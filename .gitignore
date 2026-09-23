@@ -1,0 +1,8 @@
+# Obsidian documentation vault (local-only, not part of the repo)
+ObsidianVault/
+
+# Xcode
+xcuserdata/
+*.xcuserstate
+DerivedData/
+.DS_Store

@@ -4,7 +4,17 @@ import UniformTypeIdentifiers
 struct SettingsView: View {
     @Environment(DataStore.self) private var store
 
-    @State private var goalText: String = ""
+    private enum GoalField: Hashable {
+        case calories, protein, carbs, fat, water
+    }
+
+    @FocusState private var focusedGoalField: GoalField?
+
+    @State private var calorieGoalText = ""
+    @State private var proteinGoalText = ""
+    @State private var carbsGoalText = ""
+    @State private var fatGoalText = ""
+    @State private var waterGoalText = ""
 
     @State private var activeExportURL: URL?
     @State private var showActiveMover = false
@@ -15,26 +25,49 @@ struct SettingsView: View {
     @State private var pendingImportURL: URL?
     @State private var showImportConfirmation = false
     @State private var showRestoreConfirmation = false
+    @State private var showingJSONEditor = false
+    @State private var showingDeleteAllConfirmation = false
 
     @State private var errorMessage: String?
 
     var body: some View {
         Form {
-            Section("Objetivo Diário") {
-                HStack {
-                    Text("Calorias (kcal)")
-                    Spacer()
-                    TextField("2000", text: $goalText)
-                        .keyboardType(.numberPad)
-                        .multilineTextAlignment(.trailing)
-                        .frame(width: 100)
-                        .onChange(of: goalText) { _, newValue in
-                            guard let value = Int(newValue) else { return }
-                            var settings = store.settings
-                            settings.dailyCalorieGoal = value
-                            store.updateSettings(settings)
-                        }
+            Section {
+                goalField("Calorias (kcal)", text: $calorieGoalText, field: .calories)
+                    .onChange(of: calorieGoalText) { _, newValue in
+                        guard let value = Int(newValue) else { return }
+                        updateSettings { $0.dailyCalorieGoal = value }
+                    }
+                goalField("Proteína (g)", text: $proteinGoalText, field: .protein)
+                    .onChange(of: proteinGoalText) { _, newValue in
+                        updateSettings { $0.proteinGoal = optionalGramValue(newValue) }
+                    }
+                goalField("Hidratos de Carbono (g)", text: $carbsGoalText, field: .carbs)
+                    .onChange(of: carbsGoalText) { _, newValue in
+                        updateSettings { $0.carbsGoal = optionalGramValue(newValue) }
+                    }
+                goalField("Gordura (g)", text: $fatGoalText, field: .fat)
+                    .onChange(of: fatGoalText) { _, newValue in
+                        updateSettings { $0.fatGoal = optionalGramValue(newValue) }
+                    }
+                goalField("Água (ml)", text: $waterGoalText, field: .water)
+                    .onChange(of: waterGoalText) { _, newValue in
+                        updateSettings { $0.dailyWaterGoalML = newValue.isEmpty ? nil : Int(newValue) }
+                    }
+            } header: {
+                Text("Objetivos Diários")
+            } footer: {
+                Text("Deixa em branco a proteína, os hidratos de carbono, a gordura ou a água para não definir objetivo.")
+            }
+
+            Section {
+                NavigationLink {
+                    StoresListView()
+                } label: {
+                    Label("Lojas", systemImage: "storefront")
                 }
+            } footer: {
+                Text("Cria, edita ou elimina as lojas onde registas preços dos alimentos.")
             }
 
             Section {
@@ -66,15 +99,56 @@ struct SettingsView: View {
             } header: {
                 Text("Gestão de Dados")
             } footer: {
-                if let backupTimestamp = store.backupTimestamp {
-                    Text("Último backup: \(backupTimestamp.formatted(date: .abbreviated, time: .shortened))")
-                } else {
-                    Text("Ainda não existe nenhum backup. É criado automaticamente sempre que importares uma base de dados.")
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("O ficheiro inclui tudo: registos diários, catálogo de alimentos, receitas, suplementos, categorias, stocks, lojas, preços e definições. Podes editá-lo ou acrescentar dados à mão antes de o importares de volta.")
+                    if let backupTimestamp = store.backupTimestamp {
+                        Text("Último backup: \(backupTimestamp.formatted(date: .abbreviated, time: .shortened))")
+                    } else {
+                        Text("Ainda não existe nenhum backup. É criado automaticamente sempre que importares uma base de dados.")
+                    }
                 }
+            }
+
+            Section {
+                Button {
+                    showingJSONEditor = true
+                } label: {
+                    Label("Ver / Editar JSON", systemImage: "curlybraces")
+                }
+            } header: {
+                Text("Base de Dados (JSON)")
+            } footer: {
+                Text("Mostra o JSON completo da base de dados ativa, exatamente como seria exportado. Guardar altera os teus dados diretamente e cria um backup da versão anterior, tal como importar um ficheiro.")
+            }
+
+            Section {
+                Button(role: .destructive) {
+                    showingDeleteAllConfirmation = true
+                } label: {
+                    Label("Eliminar Todos os Dados", systemImage: "trash.fill")
+                }
+            } header: {
+                Text("Zona de Perigo")
+            } footer: {
+                Text("Elimina permanentemente tudo o que esta app tem guardado no telemóvel, incluindo o backup. Pede confirmação com pressão longa de 5 segundos.")
             }
         }
         .navigationTitle("Definições")
-        .onAppear { goalText = String(store.settings.dailyCalorieGoal) }
+        .scrollDismissesKeyboard(.interactively)
+        .simultaneousGesture(TapGesture().onEnded { focusedGoalField = nil })
+        .toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("Concluir") { focusedGoalField = nil }
+            }
+        }
+        .onAppear(perform: loadGoalFields)
+        .sheet(isPresented: $showingJSONEditor) {
+            JSONEditorView()
+        }
+        .sheet(isPresented: $showingDeleteAllConfirmation) {
+            DeleteAllDataConfirmationView()
+        }
         .fileMover(isPresented: $showActiveMover, file: activeExportURL) { result in
             if case .failure(let error) = result {
                 errorMessage = error.localizedDescription
@@ -131,6 +205,38 @@ struct SettingsView: View {
         } message: {
             Text(errorMessage ?? "")
         }
+    }
+
+    private func goalField(_ label: String, text: Binding<String>, field: GoalField) -> some View {
+        HStack {
+            Text(label)
+            Spacer()
+            TextField("—", text: text)
+                .keyboardType(.numberPad)
+                .multilineTextAlignment(.trailing)
+                .frame(width: 100)
+                .focused($focusedGoalField, equals: field)
+        }
+    }
+
+    private func loadGoalFields() {
+        let settings = store.settings
+        calorieGoalText = String(settings.dailyCalorieGoal)
+        proteinGoalText = settings.proteinGoal.map { String(Int($0)) } ?? ""
+        carbsGoalText = settings.carbsGoal.map { String(Int($0)) } ?? ""
+        fatGoalText = settings.fatGoal.map { String(Int($0)) } ?? ""
+        waterGoalText = settings.dailyWaterGoalML.map(String.init) ?? ""
+    }
+
+    private func optionalGramValue(_ text: String) -> Double? {
+        guard !text.isEmpty else { return nil }
+        return Int(text).map(Double.init)
+    }
+
+    private func updateSettings(_ mutate: (inout UserSettings) -> Void) {
+        var settings = store.settings
+        mutate(&settings)
+        store.updateSettings(settings)
     }
 
     private func exportActive() {

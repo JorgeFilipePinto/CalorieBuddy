@@ -19,6 +19,11 @@ struct ContentView: View {
             .tabItem { Label("Alimentos", systemImage: "carrot") }
 
             NavigationStack {
+                HealthSectionView()
+            }
+            .tabItem { Label("Saúde", systemImage: "heart.text.square") }
+
+            NavigationStack {
                 SettingsView()
             }
             .tabItem { Label("Definições", systemImage: "gearshape") }
@@ -29,4 +34,5 @@ struct ContentView: View {
 #Preview {
     ContentView()
         .environment(DataStore())
+        .environment(HealthKitManager())
 }

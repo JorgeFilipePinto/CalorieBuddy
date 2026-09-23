@@ -250,6 +250,7 @@
 		000000000000000111000000 /* Debug configuration for PBXNativeTarget "CalorieBuddy" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = CalorieBuddy.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = TWFY3A6N99;
@@ -260,6 +261,8 @@
 				INFOPLIST_KEY_CFBundleDisplayName = CalorieBuddy;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.healthcare-fitness";
 				INFOPLIST_KEY_NSCameraUsageDescription = "A CalorieBuddy usa a câmara para digitalizar códigos de barras de alimentos.";
+				INFOPLIST_KEY_NSHealthShareUsageDescription = "A CalorieBuddy lê o teu peso, massa gorda, IMC, sono, água, café e calorias queimadas da app Saúde para os mostrar aqui.";
+				INFOPLIST_KEY_NSHealthUpdateUsageDescription = "A CalorieBuddy grava o peso, a água e o café que registares aqui na app Saúde.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -294,6 +297,7 @@
 		000000000000000112000000 /* Release configuration for PBXNativeTarget "CalorieBuddy" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = CalorieBuddy.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = TWFY3A6N99;
@@ -304,6 +308,8 @@
 				INFOPLIST_KEY_CFBundleDisplayName = CalorieBuddy;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.healthcare-fitness";
 				INFOPLIST_KEY_NSCameraUsageDescription = "A CalorieBuddy usa a câmara para digitalizar códigos de barras de alimentos.";
+				INFOPLIST_KEY_NSHealthShareUsageDescription = "A CalorieBuddy lê o teu peso, massa gorda, IMC, sono, água, café e calorias queimadas da app Saúde para os mostrar aqui.";
+				INFOPLIST_KEY_NSHealthUpdateUsageDescription = "A CalorieBuddy grava o peso, a água e o café que registares aqui na app Saúde.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;

@@ -8,6 +8,12 @@ import VisionKit
 struct BarcodeScannerView: View {
     @Environment(\.dismiss) private var dismiss
     let onScan: (String) -> Void
+    /// Whether a successful scan dismisses this view on its own. Defaults to `true`, matching
+    /// every call site that presents this as its own standalone sheet. Pass `false` when this
+    /// view is instead swapped out for other content by a parent driving a multi-step flow
+    /// (e.g. `ScanAndLogEntryView`) — there, dismissing here would close the whole flow instead
+    /// of advancing to its next step.
+    var dismissesAfterScan: Bool = true
 
     @State private var manualCode = ""
 
@@ -56,7 +62,9 @@ struct BarcodeScannerView: View {
     private func handleScan(_ code: String) {
         guard !code.isEmpty else { return }
         onScan(code)
-        dismiss()
+        if dismissesAfterScan {
+            dismiss()
+        }
     }
 }
 
