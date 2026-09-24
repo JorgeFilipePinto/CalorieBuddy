@@ -261,7 +261,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = CalorieBuddy;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.healthcare-fitness";
 				INFOPLIST_KEY_NSCameraUsageDescription = "A CalorieBuddy usa a câmara para digitalizar códigos de barras de alimentos.";
-				INFOPLIST_KEY_NSHealthShareUsageDescription = "A CalorieBuddy lê o teu peso, massa gorda, IMC, sono, água, café e calorias queimadas da app Saúde para os mostrar aqui.";
+				INFOPLIST_KEY_NSHealthShareUsageDescription = "A CalorieBuddy lê o teu peso, massa gorda, IMC, sono, água, café, calorias queimadas e treinos da app Saúde para os mostrar aqui e calcular os teus recordes pessoais.";
 				INFOPLIST_KEY_NSHealthUpdateUsageDescription = "A CalorieBuddy grava o peso, a água e o café que registares aqui na app Saúde.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
@@ -308,7 +308,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = CalorieBuddy;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.healthcare-fitness";
 				INFOPLIST_KEY_NSCameraUsageDescription = "A CalorieBuddy usa a câmara para digitalizar códigos de barras de alimentos.";
-				INFOPLIST_KEY_NSHealthShareUsageDescription = "A CalorieBuddy lê o teu peso, massa gorda, IMC, sono, água, café e calorias queimadas da app Saúde para os mostrar aqui.";
+				INFOPLIST_KEY_NSHealthShareUsageDescription = "A CalorieBuddy lê o teu peso, massa gorda, IMC, sono, água, café, calorias queimadas e treinos da app Saúde para os mostrar aqui e calcular os teus recordes pessoais.";
 				INFOPLIST_KEY_NSHealthUpdateUsageDescription = "A CalorieBuddy grava o peso, a água e o café que registares aqui na app Saúde.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;

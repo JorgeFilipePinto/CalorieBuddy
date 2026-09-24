@@ -100,7 +100,7 @@ struct SettingsView: View {
                 Text("Gestão de Dados")
             } footer: {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("O ficheiro inclui tudo: registos diários, catálogo de alimentos, receitas, suplementos, categorias, stocks, lojas, preços e definições. Podes editá-lo ou acrescentar dados à mão antes de o importares de volta.")
+                    Text("O ficheiro inclui tudo: registos diários, catálogo de alimentos, receitas, plano alimentar, suplementos, categorias, stocks, lojas, preços e definições. Podes editá-lo ou acrescentar dados à mão antes de o importares de volta.")
                     if let backupTimestamp = store.backupTimestamp {
                         Text("Último backup: \(backupTimestamp.formatted(date: .abbreviated, time: .shortened))")
                     } else {
