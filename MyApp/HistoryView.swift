@@ -35,6 +35,24 @@ struct HistoryView: View {
 
     var body: some View {
         List {
+            Section {
+                NavigationLink {
+                    PersonalRecordsView()
+                } label: {
+                    Label("Recordes Pessoais", systemImage: "trophy.fill")
+                }
+            } footer: {
+                Text("Os teus melhores tempos, distâncias e treinos, a partir da app Saúde.")
+            }
+
+            if allDays.isEmpty {
+                ContentUnavailableView(
+                    "Sem histórico",
+                    systemImage: "calendar",
+                    description: Text("Os dias com registos vão aparecer aqui.")
+                )
+            }
+
             ForEach(allDays, id: \.self) { day in
                 NavigationLink(value: day) {
                     dayRow(day)
@@ -57,15 +75,6 @@ struct HistoryView: View {
         .navigationTitle("Histórico")
         .navigationDestination(for: Date.self) { day in
             DayView(date: day)
-        }
-        .overlay {
-            if allDays.isEmpty {
-                ContentUnavailableView(
-                    "Sem histórico",
-                    systemImage: "calendar",
-                    description: Text("Os dias com registos vão aparecer aqui.")
-                )
-            }
         }
         .task {
             await healthKit.requestAuthorization()
