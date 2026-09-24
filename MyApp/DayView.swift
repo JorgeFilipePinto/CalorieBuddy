@@ -11,6 +11,7 @@ struct DayView: View {
     @State private var showingScannerEntry = false
     @State private var showingCatalogPicker = false
     @State private var showingRecipePicker = false
+    @State private var showingMealPlanPicker = false
     @State private var showingSupplementPicker = false
     @State private var entryToEdit: FoodEntry?
 
@@ -187,6 +188,11 @@ struct DayView: View {
                         Label("Do Catálogo", systemImage: "tray.full")
                     }
                     Button {
+                        showingMealPlanPicker = true
+                    } label: {
+                        Label("Do Plano Alimentar", systemImage: "list.clipboard")
+                    }
+                    Button {
                         showingRecipePicker = true
                     } label: {
                         Label("Registar Receita", systemImage: "list.bullet.rectangle")
@@ -212,6 +218,9 @@ struct DayView: View {
         }
         .sheet(isPresented: $showingRecipePicker) {
             RecipePickerView(date: date)
+        }
+        .sheet(isPresented: $showingMealPlanPicker) {
+            MealPlanPickerView(date: date)
         }
         .sheet(isPresented: $showingSupplementPicker) {
             SupplementPickerView(date: date)

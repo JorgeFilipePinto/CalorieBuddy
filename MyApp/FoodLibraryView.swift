@@ -1,10 +1,20 @@
 import SwiftUI
 
-/// Landing page for everything food-related: recipes, the food catalog, supplements and the
+/// Landing page for everything food-related: the meal plan, recipes, the food catalog, supplements and the
 /// stores/prices behind the light financial tracking. Each is its own dedicated page.
 struct FoodLibraryView: View {
     var body: some View {
         List {
+            Section {
+                NavigationLink {
+                    MealPlanView()
+                } label: {
+                    Label("Plano Alimentar", systemImage: "list.clipboard")
+                }
+            } footer: {
+                Text("O plano do nutricionista, com cada refeição ligada a uma receita que podes registar diretamente.")
+            }
+
             Section {
                 NavigationLink {
                     RecipesListView()

@@ -5,6 +5,8 @@ import UserNotifications
 enum DataStoreError: LocalizedError {
     case noBackupAvailable
     case invalidFile(String)
+    case invalidMealPlanFile(String)
+    case noMealPlan
 
     var errorDescription: String? {
         switch self {
@@ -12,6 +14,10 @@ enum DataStoreError: LocalizedError {
             return "Não existe nenhuma base de dados de backup para restaurar ou descarregar."
         case .invalidFile(let reason):
             return "O ficheiro selecionado não é uma base de dados válida da CalorieBuddy (\(reason))."
+        case .invalidMealPlanFile(let reason):
+            return "O ficheiro selecionado não é um plano alimentar válido da CalorieBuddy (\(reason))."
+        case .noMealPlan:
+            return "Ainda não existe nenhum plano alimentar para exportar."
         }
     }
 }
@@ -31,6 +37,7 @@ final class DataStore {
     private(set) var supplements: [Supplement] = []
     private(set) var supplementLogs: [SupplementLogEntry] = []
     private(set) var stockLocations: [StockLocation] = []
+    private(set) var mealPlan: MealPlan?
     var settings: UserSettings = .default
 
     private(set) var backupTimestamp: Date?
@@ -76,10 +83,26 @@ final class DataStore {
     // "V2" because supplement stocks moved from a freeform name to a shared `StockLocation`;
     // bumping the key makes the seed run once more for anyone who already got the V1 seed.
     private static let hasSeededTestSupplementsKey = "CalorieBuddy.hasSeededTestSupplementsV2"
+    private static let hasSeededMealPlanKey = "CalorieBuddy.hasSeededMealPlanJune26"
 
     private func seedExampleDataIfNeeded() {
         seedFoodGuideIfNeeded()
         seedTestSupplementsIfNeeded()
+        seedMealPlanIfNeeded()
+    }
+
+    /// Seeds the June 2026 meal plan (see `MealPlanSeed`) with its recipes and the catalog foods
+    /// they use, reusing any catalog food that already exists under the same name.
+    private func seedMealPlanIfNeeded() {
+        guard !UserDefaults.standard.bool(forKey: Self.hasSeededMealPlanKey) else { return }
+        UserDefaults.standard.set(true, forKey: Self.hasSeededMealPlanKey)
+        guard mealPlan == nil else { return }
+
+        let seed = MealPlanSeed.build(existingFoods: foodItems)
+        foodItems.append(contentsOf: seed.newFoods)
+        recipes.append(contentsOf: seed.recipes)
+        mealPlan = seed.plan
+        persistActive()
     }
 
     private func seedFoodGuideIfNeeded() {
@@ -228,6 +251,26 @@ final class DataStore {
         recipe.items.reduce(0) { partial, item in
             guard let food = foodItems.first(where: { $0.id == item.foodItemID }) else { return partial }
             return partial + food.scaledCalories(quantity: item.quantity)
+        }
+    }
+
+    func recipe(withID id: UUID) -> Recipe? {
+        recipes.first { $0.id == id }
+    }
+
+    /// Calories and macros of one serving of `recipe`, summed over its catalog foods.
+    func nutrition(for recipe: Recipe) -> NutritionTotals {
+        nutrition(of: recipe.items)
+    }
+
+    /// Calories and macros of a list of catalog foods and their quantities.
+    func nutrition(of items: [RecipeItem]) -> NutritionTotals {
+        items.reduce(into: NutritionTotals()) { totals, item in
+            guard let food = foodItems.first(where: { $0.id == item.foodItemID }) else { return }
+            totals.calories += food.scaledCalories(quantity: item.quantity)
+            totals.protein += food.scaledProtein(quantity: item.quantity) ?? 0
+            totals.carbs += food.scaledCarbs(quantity: item.quantity) ?? 0
+            totals.fat += food.scaledFat(quantity: item.quantity) ?? 0
         }
     }
 
@@ -424,8 +467,14 @@ final class DataStore {
     /// Logs every food in a recipe at once, tagged with a shared group so they're recognizable
     /// as having come from the same recipe.
     func logRecipe(_ recipe: Recipe, mealType: MealType, date: Date) {
+        logFoods(recipe.items, groupName: recipe.name, mealType: mealType, date: date)
+    }
+
+    /// Logs a list of catalog foods at once (e.g. a recipe with some foods swapped), tagged with
+    /// a shared group named `groupName`.
+    func logFoods(_ items: [RecipeItem], groupName: String, mealType: MealType, date: Date) {
         let groupID = UUID()
-        let newEntries: [FoodEntry] = recipe.items.compactMap { recipeItem in
+        let newEntries: [FoodEntry] = items.compactMap { recipeItem in
             guard let food = foodItems.first(where: { $0.id == recipeItem.foodItemID }) else { return nil }
             return FoodEntry(
                 name: food.name,
@@ -437,7 +486,7 @@ final class DataStore {
                 date: date,
                 barcode: food.barcodes.first,
                 groupID: groupID,
-                groupName: recipe.name
+                groupName: groupName
             )
         }
         guard !newEntries.isEmpty else { return }
@@ -496,6 +545,72 @@ final class DataStore {
         persistActive()
     }
 
+    // MARK: - Meal plan
+
+    /// Links one option of the meal plan to `recipeID` (or unlinks it, with `nil`).
+    func linkMealPlanOption(_ optionID: UUID, inMeal mealID: UUID, toRecipe recipeID: UUID?) {
+        guard let mealIndex = mealPlan?.meals.firstIndex(where: { $0.id == mealID }),
+              let optionIndex = mealPlan?.meals[mealIndex].options.firstIndex(where: { $0.id == optionID }) else { return }
+        mealPlan?.meals[mealIndex].options[optionIndex].recipeID = recipeID
+        persistActive()
+    }
+
+    /// Removes the meal plan. Its recipes and foods stay in the catalog.
+    func deleteMealPlan() {
+        mealPlan = nil
+        persistActive()
+    }
+
+    /// Writes the meal plan, plus every recipe it links to and every food those recipes use, to
+    /// a temporary JSON file and returns its URL, ready to be handed to a file mover.
+    func exportMealPlanURL() throws -> URL {
+        guard let mealPlan else { throw DataStoreError.noMealPlan }
+        let recipeIDs = Set(mealPlan.meals.flatMap(\.options).compactMap(\.recipeID))
+        let linkedRecipes = recipes.filter { recipeIDs.contains($0.id) }
+        let foodIDs = Set(linkedRecipes.flatMap(\.items).map(\.foodItemID))
+        // Prices point at stores that won't exist in another database, so they're left out.
+        let linkedFoods = foodItems.filter { foodIDs.contains($0.id) }.map { food in
+            var food = food
+            food.prices = []
+            return food
+        }
+        let file = MealPlanFile(
+            format: MealPlanFile.formatIdentifier,
+            version: MealPlanFile.currentVersion,
+            exportedAt: Date(),
+            plan: mealPlan,
+            recipes: linkedRecipes,
+            foodItems: linkedFoods
+        )
+        return try writeTempSnapshot(data: encoder.encode(file), name: "PlanoAlimentar")
+    }
+
+    /// Replaces the meal plan with the one in `url`. Recipes and foods in the file are added to
+    /// the catalog unless one with the same ID already exists, in which case the existing one
+    /// is kept (so re-importing a plan never overwrites edits made in the app).
+    func importMealPlan(from url: URL) throws {
+        let didStartAccess = url.startAccessingSecurityScopedResource()
+        defer { if didStartAccess { url.stopAccessingSecurityScopedResource() } }
+
+        let data = try Data(contentsOf: url)
+        let file: MealPlanFile
+        do {
+            file = try decoder.decode(MealPlanFile.self, from: data)
+        } catch {
+            throw DataStoreError.invalidMealPlanFile(error.localizedDescription)
+        }
+        guard file.format == MealPlanFile.formatIdentifier else {
+            throw DataStoreError.invalidMealPlanFile("formato \"\(file.format)\" desconhecido")
+        }
+
+        let existingFoodIDs = Set(foodItems.map(\.id))
+        foodItems.append(contentsOf: file.foodItems.filter { !existingFoodIDs.contains($0.id) })
+        let existingRecipeIDs = Set(recipes.map(\.id))
+        recipes.append(contentsOf: file.recipes.filter { !existingRecipeIDs.contains($0.id) })
+        mealPlan = file.plan
+        persistActive()
+    }
+
     // MARK: - Stores
 
     func addStore(_ store: Store) {
@@ -531,6 +646,7 @@ final class DataStore {
         supplements = database.supplements
         supplementLogs = database.supplementLogs
         stockLocations = database.stockLocations
+        mealPlan = database.mealPlan
     }
 
     /// Re-reads the active database file from disk and updates in-memory state to match it.
@@ -555,7 +671,8 @@ final class DataStore {
             supplementCategories: supplementCategories,
             supplements: supplements,
             supplementLogs: supplementLogs,
-            stockLocations: stockLocations
+            stockLocations: stockLocations,
+            mealPlan: mealPlan
         )
     }
 
@@ -660,6 +777,7 @@ final class DataStore {
         supplements = database.supplements
         supplementLogs = database.supplementLogs
         stockLocations = database.stockLocations
+        mealPlan = database.mealPlan
         persistActive()
         refreshBackupTimestamp()
     }
@@ -696,14 +814,15 @@ final class DataStore {
         supplements = restoredDatabase.supplements
         supplementLogs = restoredDatabase.supplementLogs
         stockLocations = restoredDatabase.stockLocations
+        mealPlan = restoredDatabase.mealPlan
         persistActive()
         refreshBackupTimestamp()
     }
 
     // MARK: - Delete everything
 
-    /// Wipes every piece of data this app stores locally — entries, catalog, recipes, stores,
-    /// supplements and settings — including the on-disk backup. Does not touch Apple Health.
+    /// Wipes every piece of data this app stores locally — entries, catalog, recipes, meal plan,
+    /// stores, supplements and settings — including the on-disk backup. Does not touch Apple Health.
     func deleteEverything() {
         entries = []
         foodItems = []
@@ -713,6 +832,7 @@ final class DataStore {
         supplements = []
         supplementLogs = []
         stockLocations = []
+        mealPlan = nil
         settings = .default
         try? fileManager.removeItem(at: backupURL)
         backupTimestamp = nil

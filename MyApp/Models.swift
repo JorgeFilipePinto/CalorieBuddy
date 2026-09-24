@@ -371,6 +371,94 @@ struct FoodItem: Identifiable, Codable, Hashable, Doseable, Favoritable {
     func scaledFat(quantity: Double) -> Double? { fat.map { $0 * nutritionScale * quantity } }
 }
 
+/// The nutrient two foods are matched on when one is swapped for an "equivalent" other.
+enum Macro: String, CaseIterable {
+    case protein, carbs, fat, calories
+
+    var displayName: String {
+        switch self {
+        case .protein: return "proteína"
+        case .carbs: return "hidratos de carbono"
+        case .fat: return "gordura"
+        case .calories: return "calorias"
+        }
+    }
+
+    var unitLabel: String { self == .calories ? "kcal" : "g" }
+}
+
+extension FoodItem {
+    /// Amount of `macro` in `quantity` doses, or `nil` if the food doesn't state it.
+    func amount(of macro: Macro, quantity: Double) -> Double? {
+        switch macro {
+        case .protein: return scaledProtein(quantity: quantity)
+        case .carbs: return scaledCarbs(quantity: quantity)
+        case .fat: return scaledFat(quantity: quantity)
+        case .calories: return Double(calories) * nutritionScale * quantity
+        }
+    }
+
+    /// The macro that contributes most of this food's energy (4 kcal/g protein and carbs,
+    /// 9 kcal/g fat) — what defines which foods count as its equivalents. Falls back to
+    /// calories for foods without macros.
+    var dominantMacro: Macro {
+        let energy: [(Macro, Double)] = [
+            (.protein, (protein ?? 0) * 4),
+            (.carbs, (carbs ?? 0) * 4),
+            (.fat, (fat ?? 0) * 9)
+        ]
+        guard let best = energy.max(by: { $0.1 < $1.1 }), best.1 > 0 else { return .calories }
+        return best.0
+    }
+
+    /// Size of one dose in the base unit (g, ml or units).
+    var baseDoseAmount: Double { doseSize * unit.baseMultiplier }
+
+    /// How many doses of this food provide the same amount of `macro` as `quantity` doses of
+    /// `other`, rounded to a practical amount (5 g/ml steps, or half units). `nil` when this food
+    /// has none of that macro.
+    func equivalentQuantity(to other: FoodItem, quantity: Double, matching macro: Macro) -> Double? {
+        guard let target = other.amount(of: macro, quantity: quantity),
+              let perDose = amount(of: macro, quantity: 1), perDose > 0, baseDoseAmount > 0 else { return nil }
+        return roundedQuantity(target / perDose)
+    }
+
+    /// Share (0–1) of this food's energy that comes from `macro`.
+    func energyShare(of macro: Macro) -> Double {
+        let macroEnergy = (protein ?? 0) * 4 + (carbs ?? 0) * 4 + (fat ?? 0) * 9
+        let total = max(Double(calories), macroEnergy)
+        guard total > 0 else { return 0 }
+        switch macro {
+        case .protein: return (protein ?? 0) * 4 / total
+        case .carbs: return (carbs ?? 0) * 4 / total
+        case .fat: return (fat ?? 0) * 9 / total
+        case .calories: return 1
+        }
+    }
+
+    /// The amount of this food that sensibly replaces `quantity` doses of `other`, matching
+    /// `other`'s main macro — or `nil` if this food isn't a real equivalent: it must be a genuine
+    /// source of that macro (≥ 40% of its energy), the amount must be a realistic serving (at
+    /// most 4 of its own doses) and the calories must stay within half/double of the original.
+    func practicalEquivalentQuantity(to other: FoodItem, quantity: Double) -> Double? {
+        let macro = other.dominantMacro
+        guard dominantMacro == macro, energyShare(of: macro) >= 0.4,
+              let equivalent = equivalentQuantity(to: other, quantity: quantity, matching: macro),
+              equivalent <= 4 else { return nil }
+        let originalCalories = Double(max(other.scaledCalories(quantity: quantity), 1))
+        let ratio = Double(scaledCalories(quantity: equivalent)) / originalCalories
+        return (0.5...2).contains(ratio) ? equivalent : nil
+    }
+
+    /// `quantity` doses, rounded so the base amount is a practical one to weigh or count.
+    func roundedQuantity(_ quantity: Double) -> Double {
+        let base = quantity * baseDoseAmount
+        let step: Double = unit == .unit ? 0.5 : (base >= 20 ? 5 : 1)
+        let rounded = max((base / step).rounded() * step, step)
+        return rounded / baseDoseAmount
+    }
+}
+
 /// A user-extensible category for supplements (e.g. "Proteína", "Gel Energético").
 struct SupplementCategory: Identifiable, Codable, Hashable {
     var id: UUID = UUID()
@@ -547,6 +635,65 @@ struct Recipe: Identifiable, Codable, Equatable, Favoritable {
     }
 }
 
+/// One alternative for a planned meal (e.g. "Batido proteico" or "Dias de treino"), linked to
+/// the recipe that is logged when this option is chosen.
+struct MealPlanOption: Identifiable, Codable, Equatable {
+    var id: UUID = UUID()
+    var label: String
+    /// Free text straight from the plan, e.g. "2 ovos + 100g claras + 1 fatia pão integral".
+    var details: String?
+    /// The recipe logged for this option. `nil` (or pointing at a recipe that no longer exists)
+    /// means it still has to be linked in the app before it can be logged.
+    var recipeID: UUID?
+}
+
+/// One meal of a `MealPlan` (e.g. "Almoço"), with its macro targets and the options that can
+/// fulfil it.
+struct PlannedMeal: Identifiable, Codable, Equatable {
+    var id: UUID = UUID()
+    var name: String
+    /// Which daily-log meal its options are logged under.
+    var mealType: MealType
+    var proteinTarget: Double?
+    var carbsTarget: Double?
+    var fatTarget: Double?
+    var notes: String?
+    var options: [MealPlanOption]
+}
+
+/// A nutritionist-style meal plan: a list of meals, each with one or more recipe-backed options.
+struct MealPlan: Identifiable, Codable, Equatable {
+    var id: UUID = UUID()
+    var name: String
+    var author: String?
+    var prescribedAt: Date?
+    /// General guidance that isn't tied to a single meal (water, intra-workout, ...).
+    var notes: String?
+    var meals: [PlannedMeal]
+}
+
+/// A meal plan as exported/imported on its own. Self-contained: it carries every recipe the plan
+/// links to and every catalog food those recipes use, so it can be imported into any database.
+struct MealPlanFile: Codable {
+    static let formatIdentifier = "CalorieBuddy.MealPlan"
+    static let currentVersion = 1
+
+    var format: String
+    var version: Int
+    var exportedAt: Date
+    var plan: MealPlan
+    var recipes: [Recipe]
+    var foodItems: [FoodItem]
+}
+
+/// Calories and macros of a recipe (or anything else summed from catalog foods).
+struct NutritionTotals: Equatable {
+    var calories: Int = 0
+    var protein: Double = 0
+    var carbs: Double = 0
+    var fat: Double = 0
+}
+
 struct UserSettings: Codable, Equatable {
     var dailyCalorieGoal: Int
     var proteinGoal: Double?
@@ -565,8 +712,8 @@ struct UserSettings: Codable, Equatable {
 
 /// The full contents of a CalorieBuddy database, as exported/imported via JSON.
 ///
-/// Uses a custom decoder so that databases exported before `foodItems`/`recipes` existed
-/// (version 1) still import cleanly, with those collections defaulting to empty.
+/// Uses a custom decoder so that databases exported before `foodItems`/`recipes`/`mealPlan`
+/// existed (version 1) still import cleanly, with those collections defaulting to empty.
 struct AppDatabase: Codable {
     static let currentVersion = 2
 
@@ -581,6 +728,7 @@ struct AppDatabase: Codable {
     var supplements: [Supplement]
     var supplementLogs: [SupplementLogEntry]
     var stockLocations: [StockLocation]
+    var mealPlan: MealPlan?
 
     init(
         version: Int,
@@ -593,7 +741,8 @@ struct AppDatabase: Codable {
         supplementCategories: [SupplementCategory] = [],
         supplements: [Supplement] = [],
         supplementLogs: [SupplementLogEntry] = [],
-        stockLocations: [StockLocation] = []
+        stockLocations: [StockLocation] = [],
+        mealPlan: MealPlan? = nil
     ) {
         self.version = version
         self.exportedAt = exportedAt
@@ -606,11 +755,12 @@ struct AppDatabase: Codable {
         self.supplements = supplements
         self.supplementLogs = supplementLogs
         self.stockLocations = stockLocations
+        self.mealPlan = mealPlan
     }
 
     private enum CodingKeys: String, CodingKey {
         case version, exportedAt, settings, entries, foodItems, recipes, stores,
-             supplementCategories, supplements, supplementLogs, stockLocations
+             supplementCategories, supplements, supplementLogs, stockLocations, mealPlan
     }
 
     init(from decoder: Decoder) throws {
@@ -626,5 +776,6 @@ struct AppDatabase: Codable {
         supplements = try container.decodeIfPresent([Supplement].self, forKey: .supplements) ?? []
         supplementLogs = try container.decodeIfPresent([SupplementLogEntry].self, forKey: .supplementLogs) ?? []
         stockLocations = try container.decodeIfPresent([StockLocation].self, forKey: .stockLocations) ?? []
+        mealPlan = try container.decodeIfPresent(MealPlan.self, forKey: .mealPlan)
     }
 }
