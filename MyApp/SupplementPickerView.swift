@@ -120,6 +120,7 @@ struct SupplementPickerView: View {
             quantity: quantity,
             date: date
         )
+        AppAnalytics.log(.entryLogged(source: .supplement, mealType: nil))
         if isLowStock {
             lowStockSupplementName = selectedSupplement.name
             showingLowStockAlert = true

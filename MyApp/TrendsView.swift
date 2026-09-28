@@ -125,6 +125,7 @@ struct TrendsView: View {
             }
         }
         .navigationTitle("Evolução")
+        .trackScreen("Evolução")
         .navigationBarHidden(isLandscapeFullScreen)
         .task(id: rangeDays) {
             isLoading = true

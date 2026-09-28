@@ -169,6 +169,7 @@ struct DayView: View {
             }
         }
         .navigationTitle(title)
+        .trackScreen(isToday ? "Hoje" : "Dia")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Menu {

@@ -68,6 +68,7 @@ struct FoodCatalogListView: View {
             }
         }
         .navigationTitle("Catálogo de Alimentos")
+        .trackScreen("Catálogo de Alimentos")
         .searchable(text: $searchText, prompt: "Procurar por nome")
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {

@@ -62,6 +62,7 @@ struct FoodLibraryView: View {
             }
         }
         .navigationTitle("Alimentos")
+        .trackScreen("Alimentos")
     }
 }
 

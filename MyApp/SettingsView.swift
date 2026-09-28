@@ -62,6 +62,16 @@ struct SettingsView: View {
 
             Section {
                 NavigationLink {
+                    CloudBackupView()
+                } label: {
+                    Label("Nuvem e Estatísticas", systemImage: "icloud")
+                }
+            } footer: {
+                Text("Backup automático da base de dados na Firebase e estatísticas de uso.")
+            }
+
+            Section {
+                NavigationLink {
                     StoresListView()
                 } label: {
                     Label("Lojas", systemImage: "storefront")
@@ -134,8 +144,14 @@ struct SettingsView: View {
             }
         }
         .navigationTitle("Definições")
+        .trackScreen("Definições")
         .scrollDismissesKeyboard(.interactively)
-        .simultaneousGesture(TapGesture().onEnded { focusedGoalField = nil })
+        // Tap-to-dismiss only while a goal field is being edited: an always-on tap gesture on
+        // the Form swallows the taps meant for its NavigationLinks.
+        .simultaneousGesture(
+            TapGesture().onEnded { focusedGoalField = nil },
+            including: focusedGoalField == nil ? .subviews : .all
+        )
         .toolbar {
             ToolbarItemGroup(placement: .keyboard) {
                 Spacer()
@@ -243,6 +259,7 @@ struct SettingsView: View {
         do {
             activeExportURL = try store.exportActiveSnapshotURL()
             showActiveMover = true
+            AppAnalytics.log(.databaseExported)
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -261,6 +278,7 @@ struct SettingsView: View {
         guard let url = pendingImportURL else { return }
         do {
             try store.importDatabase(from: url)
+            AppAnalytics.log(.databaseImported)
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -281,4 +299,5 @@ struct SettingsView: View {
         SettingsView()
     }
     .environment(DataStore())
+    .environment(CloudBackupManager())
 }

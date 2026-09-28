@@ -79,6 +79,7 @@ struct CatalogPickerView: View {
                     Button("Registar") {
                         guard let selectedItem, let quantity else { return }
                         store.logFoodItem(selectedItem, quantity: quantity, mealType: mealType, date: date)
+                        AppAnalytics.log(.entryLogged(source: .catalog, mealType: mealType))
                         dismiss()
                     }
                     .disabled(selectedItem == nil || quantity == nil)

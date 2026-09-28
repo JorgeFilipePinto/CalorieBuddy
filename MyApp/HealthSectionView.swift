@@ -30,6 +30,7 @@ struct HealthSectionView: View {
             }
         }
         .navigationTitle("Saúde")
+        .trackScreen("Saúde")
         .task { await healthKit.requestAuthorization() }
         .refreshable { await healthKit.refresh() }
         .sheet(isPresented: $showingLogWeight) {

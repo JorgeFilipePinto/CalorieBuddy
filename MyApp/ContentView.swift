@@ -35,4 +35,5 @@ struct ContentView: View {
     ContentView()
         .environment(DataStore())
         .environment(HealthKitManager())
+        .environment(CloudBackupManager())
 }

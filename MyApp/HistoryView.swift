@@ -73,6 +73,7 @@ struct HistoryView: View {
             }
         }
         .navigationTitle("Histórico")
+        .trackScreen("Histórico")
         .navigationDestination(for: Date.self) { day in
             DayView(date: day)
         }

@@ -322,6 +322,8 @@ struct PersonalRecordsView: View {
             }
         }
         .navigationTitle("Recordes Pessoais")
+        .trackScreen("Recordes Pessoais")
+        .onAppear { AppAnalytics.log(.personalRecordsViewed) }
         .overlay {
             if healthKit.isLoadingRecords && healthKit.recordWorkouts.isEmpty {
                 ProgressView("A calcular recordes…")

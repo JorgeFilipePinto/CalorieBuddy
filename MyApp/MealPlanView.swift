@@ -74,6 +74,7 @@ struct MealPlanView: View {
             }
         }
         .navigationTitle("Plano Alimentar")
+        .trackScreen("Plano Alimentar")
         .refreshable { store.reloadFromDisk() }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
@@ -221,6 +222,7 @@ struct MealPlanView: View {
         do {
             exportURL = try store.exportMealPlanURL()
             showExportMover = true
+            AppAnalytics.log(.mealPlanExported)
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -230,6 +232,7 @@ struct MealPlanView: View {
         guard let url = pendingImportURL else { return }
         do {
             try store.importMealPlan(from: url)
+            AppAnalytics.log(.mealPlanImported)
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -429,12 +432,25 @@ struct LogMealPlanOptionView: View {
                 Button("Registar") {
                     if let recipe {
                         store.logFoods(lines, groupName: recipe.name, mealType: mealType, date: logDate)
+                        logAnalytics(original: recipe.items)
                     }
                     onLogged()
                 }
                 .disabled(recipe == nil || lines.isEmpty)
             }
         }
+    }
+
+    /// Reports the logged option and how much it was customised (no nutrition values).
+    private func logAnalytics(original: [RecipeItem]) {
+        let pairs = lines.compactMap { line in original.first { $0.id == line.id }.map { (line, $0) } }
+        AppAnalytics.log(.entryLogged(source: .mealPlan, mealType: mealType))
+        AppAnalytics.log(.mealPlanOptionLogged(
+            meal: meal.name,
+            option: option.label,
+            substitutions: pairs.filter { $0.0.foodItemID != $0.1.foodItemID }.count,
+            amountChanges: pairs.filter { $0.0.foodItemID == $0.1.foodItemID && $0.0.quantity != $0.1.quantity }.count
+        ))
     }
 
     private func food(_ id: UUID) -> FoodItem? {
@@ -593,6 +609,9 @@ struct FoodSubstitutionView: View {
     private func candidateRow(_ food: FoodItem, quantity: Double) -> some View {
         Button {
             onApply(RecipeItem(id: line.id, foodItemID: food.id, quantity: quantity))
+            if let currentFood {
+                AppAnalytics.log(.foodSubstituted(macro: currentFood.dominantMacro))
+            }
             dismiss()
         } label: {
             HStack {

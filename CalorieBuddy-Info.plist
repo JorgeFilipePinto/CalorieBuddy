@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Screens are reported manually with `.trackScreen(_:)`; Firebase's automatic reporting
+	     only sees SwiftUI's internal hosting-controller class names. -->
+	<key>FirebaseAutomaticScreenReportingEnabled</key>
+	<false/>
+</dict>
+</plist>

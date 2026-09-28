@@ -112,6 +112,7 @@ private struct LogScannedItemView: View {
                     Button("Registar") {
                         guard let quantity else { return }
                         store.logFoodItem(item, quantity: quantity, mealType: mealType, date: date)
+                        AppAnalytics.log(.entryLogged(source: .barcode, mealType: mealType))
                         dismiss()
                     }
                     .disabled(quantity == nil)

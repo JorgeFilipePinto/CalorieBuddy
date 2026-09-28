@@ -67,6 +67,7 @@ struct RecipesListView: View {
             }
         }
         .navigationTitle("Receitas")
+        .trackScreen("Receitas")
         .searchable(text: $searchText, prompt: "Procurar por nome")
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {

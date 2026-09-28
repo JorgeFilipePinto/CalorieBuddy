@@ -742,6 +742,19 @@ final class DataStore {
         adoptAsActive(editedDatabase)
     }
 
+    // MARK: - Cloud sync
+
+    /// The whole database as a value, e.g. for syncing it to the cloud.
+    func databaseSnapshot() -> AppDatabase {
+        currentDatabase()
+    }
+
+    /// Replaces the active database with `database` (e.g. restored from the cloud). The database
+    /// that was active until now is preserved as the backup first, like importing a file.
+    func replaceDatabase(with database: AppDatabase) {
+        adoptAsActive(database)
+    }
+
     // MARK: - Import (upload) / Restore
 
     /// Overwrites the active database with the contents of `url`. The database that was active
