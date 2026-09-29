@@ -4,18 +4,6 @@ import UniformTypeIdentifiers
 struct SettingsView: View {
     @Environment(DataStore.self) private var store
 
-    private enum GoalField: Hashable {
-        case calories, protein, carbs, fat, water
-    }
-
-    @FocusState private var focusedGoalField: GoalField?
-
-    @State private var calorieGoalText = ""
-    @State private var proteinGoalText = ""
-    @State private var carbsGoalText = ""
-    @State private var fatGoalText = ""
-    @State private var waterGoalText = ""
-
     @State private var activeExportURL: URL?
     @State private var showActiveMover = false
     @State private var backupExportURL: URL?
@@ -33,31 +21,13 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section {
-                goalField("Calorias (kcal)", text: $calorieGoalText, field: .calories)
-                    .onChange(of: calorieGoalText) { _, newValue in
-                        guard let value = Int(newValue) else { return }
-                        updateSettings { $0.dailyCalorieGoal = value }
-                    }
-                goalField("Proteína (g)", text: $proteinGoalText, field: .protein)
-                    .onChange(of: proteinGoalText) { _, newValue in
-                        updateSettings { $0.proteinGoal = optionalGramValue(newValue) }
-                    }
-                goalField("Hidratos de Carbono (g)", text: $carbsGoalText, field: .carbs)
-                    .onChange(of: carbsGoalText) { _, newValue in
-                        updateSettings { $0.carbsGoal = optionalGramValue(newValue) }
-                    }
-                goalField("Gordura (g)", text: $fatGoalText, field: .fat)
-                    .onChange(of: fatGoalText) { _, newValue in
-                        updateSettings { $0.fatGoal = optionalGramValue(newValue) }
-                    }
-                goalField("Água (ml)", text: $waterGoalText, field: .water)
-                    .onChange(of: waterGoalText) { _, newValue in
-                        updateSettings { $0.dailyWaterGoalML = newValue.isEmpty ? nil : Int(newValue) }
-                    }
-            } header: {
-                Text("Objetivos Diários")
+                NavigationLink {
+                    NutritionPlansListView()
+                } label: {
+                    Label("Planos Alimentares", systemImage: "target")
+                }
             } footer: {
-                Text("Deixa em branco a proteína, os hidratos de carbono, a gordura ou a água para não definir objetivo.")
+                Text("Define os objetivos diários de calorias, macros e água — com valores diferentes para dias de treino e de descanso, tal como no plano do nutricionista.")
             }
 
             Section {
@@ -145,20 +115,6 @@ struct SettingsView: View {
         }
         .navigationTitle("Definições")
         .trackScreen("Definições")
-        .scrollDismissesKeyboard(.interactively)
-        // Tap-to-dismiss only while a goal field is being edited: an always-on tap gesture on
-        // the Form swallows the taps meant for its NavigationLinks.
-        .simultaneousGesture(
-            TapGesture().onEnded { focusedGoalField = nil },
-            including: focusedGoalField == nil ? .subviews : .all
-        )
-        .toolbar {
-            ToolbarItemGroup(placement: .keyboard) {
-                Spacer()
-                Button("Concluir") { focusedGoalField = nil }
-            }
-        }
-        .onAppear(perform: loadGoalFields)
         .sheet(isPresented: $showingJSONEditor) {
             JSONEditorView()
         }
@@ -221,38 +177,6 @@ struct SettingsView: View {
         } message: {
             Text(errorMessage ?? "")
         }
-    }
-
-    private func goalField(_ label: String, text: Binding<String>, field: GoalField) -> some View {
-        HStack {
-            Text(label)
-            Spacer()
-            TextField("—", text: text)
-                .keyboardType(.numberPad)
-                .multilineTextAlignment(.trailing)
-                .frame(width: 100)
-                .focused($focusedGoalField, equals: field)
-        }
-    }
-
-    private func loadGoalFields() {
-        let settings = store.settings
-        calorieGoalText = String(settings.dailyCalorieGoal)
-        proteinGoalText = settings.proteinGoal.map { String(Int($0)) } ?? ""
-        carbsGoalText = settings.carbsGoal.map { String(Int($0)) } ?? ""
-        fatGoalText = settings.fatGoal.map { String(Int($0)) } ?? ""
-        waterGoalText = settings.dailyWaterGoalML.map(String.init) ?? ""
-    }
-
-    private func optionalGramValue(_ text: String) -> Double? {
-        guard !text.isEmpty else { return nil }
-        return Int(text).map(Double.init)
-    }
-
-    private func updateSettings(_ mutate: (inout UserSettings) -> Void) {
-        var settings = store.settings
-        mutate(&settings)
-        store.updateSettings(settings)
     }
 
     private func exportActive() {

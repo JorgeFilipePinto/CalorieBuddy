@@ -38,6 +38,7 @@ final class DataStore {
     private(set) var supplementLogs: [SupplementLogEntry] = []
     private(set) var stockLocations: [StockLocation] = []
     private(set) var mealPlan: MealPlan?
+    private(set) var nutritionPlans: [NutritionPlan] = []
     var settings: UserSettings = .default
 
     private(set) var backupTimestamp: Date?
@@ -84,11 +85,34 @@ final class DataStore {
     // bumping the key makes the seed run once more for anyone who already got the V1 seed.
     private static let hasSeededTestSupplementsKey = "CalorieBuddy.hasSeededTestSupplementsV2"
     private static let hasSeededMealPlanKey = "CalorieBuddy.hasSeededMealPlanJune26"
+    private static let hasSeededNutritionPlanKey = "CalorieBuddy.hasSeededNutritionPlan"
 
     private func seedExampleDataIfNeeded() {
         seedFoodGuideIfNeeded()
         seedTestSupplementsIfNeeded()
         seedMealPlanIfNeeded()
+        seedNutritionPlanIfNeeded()
+    }
+
+    /// Seeds one initial nutrition plan carrying over whatever daily goals were already set (the
+    /// app didn't distinguish training/rest before), so training and rest targets start out the
+    /// same and `DayView` always has a plan in effect from the very first day.
+    private func seedNutritionPlanIfNeeded() {
+        guard !UserDefaults.standard.bool(forKey: Self.hasSeededNutritionPlanKey) else { return }
+        UserDefaults.standard.set(true, forKey: Self.hasSeededNutritionPlanKey)
+        guard nutritionPlans.isEmpty else { return }
+
+        let targets = NutritionTargets(
+            kcal: max(settings.dailyCalorieGoal, 500),
+            proteinG: Int(settings.proteinGoal ?? 150),
+            carbsG: Int(settings.carbsGoal ?? 250),
+            fatG: Int(settings.fatGoal ?? 70),
+            waterML: settings.dailyWaterGoalML ?? 2000
+        )
+        nutritionPlans = [
+            NutritionPlan(name: "Plano Inicial", startsOn: .distantPast, training: targets, rest: targets)
+        ]
+        persistActive()
     }
 
     /// Seeds the June 2026 meal plan (see `MealPlanSeed`) with its recipes and the catalog foods
@@ -494,6 +518,24 @@ final class DataStore {
         persistActive()
     }
 
+    /// Adds a batch of pre-built entries at once (e.g. from AI-generated JSON pasted into the
+    /// app), tagged with the given group so they're recognizable as belonging together, the same
+    /// way a logged recipe's entries are.
+    func addImportedEntries(_ newEntries: [FoodEntry], groupName: String) {
+        guard !newEntries.isEmpty else { return }
+        var entriesToAdd = newEntries
+        let trimmedGroupName = groupName.trimmingCharacters(in: .whitespaces)
+        if !trimmedGroupName.isEmpty {
+            let groupID = UUID()
+            for index in entriesToAdd.indices {
+                entriesToAdd[index].groupID = groupID
+                entriesToAdd[index].groupName = trimmedGroupName
+            }
+        }
+        entries.append(contentsOf: entriesToAdd)
+        persistActive()
+    }
+
     // MARK: - Food catalog
 
     func addFoodItem(_ item: FoodItem) {
@@ -611,6 +653,42 @@ final class DataStore {
         persistActive()
     }
 
+    // MARK: - Nutrition plans
+
+    /// The plan in effect on `date`: the most recent live plan that had already started by then.
+    func nutritionPlan(on date: Date) -> NutritionPlan? {
+        nutritionPlans.plan(on: date)
+    }
+
+    /// Whether a live (non-deleted) plan already starts on this day — two plans can't start on
+    /// the same day (which one would apply?). `excluding` lets an edit keep its own date.
+    func isNutritionPlanStartDateTaken(_ date: Date, excluding planID: UUID? = nil) -> Bool {
+        let day = Calendar.current.startOfDay(for: date)
+        return nutritionPlans.contains {
+            $0.deletedAt == nil && $0.id != planID && Calendar.current.startOfDay(for: $0.startsOn) == day
+        }
+    }
+
+    /// Creates or updates a plan (matched by `id`).
+    func saveNutritionPlan(_ plan: NutritionPlan) {
+        var plan = plan
+        plan.updatedAt = Date()
+        if let index = nutritionPlans.firstIndex(where: { $0.id == plan.id }) {
+            nutritionPlans[index] = plan
+        } else {
+            nutritionPlans.append(plan)
+        }
+        persistActive()
+    }
+
+    /// Soft-deletes a plan (kept, flagged, so it can still be looked back on): days it covered
+    /// fall back to whichever plan applied before it.
+    func deleteNutritionPlan(_ plan: NutritionPlan) {
+        guard let index = nutritionPlans.firstIndex(where: { $0.id == plan.id }) else { return }
+        nutritionPlans[index].deletedAt = Date()
+        persistActive()
+    }
+
     // MARK: - Stores
 
     func addStore(_ store: Store) {
@@ -647,6 +725,7 @@ final class DataStore {
         supplementLogs = database.supplementLogs
         stockLocations = database.stockLocations
         mealPlan = database.mealPlan
+        nutritionPlans = database.nutritionPlans
     }
 
     /// Re-reads the active database file from disk and updates in-memory state to match it.
@@ -672,7 +751,8 @@ final class DataStore {
             supplements: supplements,
             supplementLogs: supplementLogs,
             stockLocations: stockLocations,
-            mealPlan: mealPlan
+            mealPlan: mealPlan,
+            nutritionPlans: nutritionPlans
         )
     }
 
@@ -791,6 +871,7 @@ final class DataStore {
         supplementLogs = database.supplementLogs
         stockLocations = database.stockLocations
         mealPlan = database.mealPlan
+        nutritionPlans = database.nutritionPlans
         persistActive()
         refreshBackupTimestamp()
     }
@@ -828,6 +909,7 @@ final class DataStore {
         supplementLogs = restoredDatabase.supplementLogs
         stockLocations = restoredDatabase.stockLocations
         mealPlan = restoredDatabase.mealPlan
+        nutritionPlans = restoredDatabase.nutritionPlans
         persistActive()
         refreshBackupTimestamp()
     }
@@ -846,6 +928,7 @@ final class DataStore {
         supplementLogs = []
         stockLocations = []
         mealPlan = nil
+        nutritionPlans = []
         settings = .default
         try? fileManager.removeItem(at: backupURL)
         backupTimestamp = nil

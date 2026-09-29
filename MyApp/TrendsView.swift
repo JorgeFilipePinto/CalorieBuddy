@@ -134,6 +134,7 @@ struct TrendsView: View {
             isLoading = false
         }
         .refreshable {
+            Haptics.light()
             await healthKit.refresh(days: fetchDays)
         }
     }

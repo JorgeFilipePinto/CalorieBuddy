@@ -346,6 +346,7 @@ struct PersonalRecordsView: View {
             await healthKit.loadRecordWorkouts()
         }
         .refreshable {
+            Haptics.light()
             await healthKit.loadRecordWorkouts()
         }
     }

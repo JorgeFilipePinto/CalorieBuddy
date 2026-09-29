@@ -710,6 +710,105 @@ struct UserSettings: Codable, Equatable {
     )
 }
 
+/// Which kind of day a nutrition target applies to. A day counts as `training` when it has at
+/// least one logged workout, `rest` otherwise — decided from the day's data, never stored.
+enum DayType: String, Codable, CaseIterable, Identifiable {
+    case training, rest
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .training: return "Treino"
+        case .rest: return "Descanso"
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .training: return "figure.run"
+        case .rest: return "bed.double"
+        }
+    }
+}
+
+/// Daily targets for one `DayType`.
+struct NutritionTargets: Codable, Equatable {
+    var kcal: Int
+    var proteinG: Int
+    var carbsG: Int
+    var fatG: Int
+    var waterML: Int
+
+    /// Energy implied by the macros (protein/carbs 4 kcal/g, fat 9 kcal/g).
+    var macroKcal: Int { proteinG * 4 + carbsG * 4 + fatG * 9 }
+
+    /// Whether the macros disagree with `kcal` by more than 10% — usually a typo.
+    var hasMacroMismatch: Bool {
+        guard kcal > 0 else { return false }
+        return abs(Double(macroKcal - kcal)) / Double(kcal) > 0.1
+    }
+}
+
+/// A nutritionist-set plan of daily targets, in effect from `startsOn` until the next plan
+/// starts. Soft-deleted (kept, flagged) rather than removed outright, so history isn't lost.
+struct NutritionPlan: Identifiable, Codable, Equatable {
+    var id: UUID = UUID()
+    var name: String
+    var startsOn: Date
+    var notes: String?
+    var training: NutritionTargets
+    var rest: NutritionTargets
+    var createdAt: Date = Date()
+    var updatedAt: Date = Date()
+    var deletedAt: Date?
+}
+
+/// Whether a plan is currently applied, scheduled for later, or already superseded.
+enum PlanStatus {
+    case current, upcoming, past
+}
+
+/// One plan with its computed status and the last day it applies (`nil` while open-ended).
+struct ClassifiedNutritionPlan: Identifiable {
+    var plan: NutritionPlan
+    var status: PlanStatus
+    var endsOn: Date?
+    var id: UUID { plan.id }
+}
+
+extension Array where Element == NutritionPlan {
+    /// Plans that haven't been (soft-)deleted, ordered by start date.
+    var live: [NutritionPlan] {
+        filter { $0.deletedAt == nil }.sorted { $0.startsOn < $1.startsOn }
+    }
+
+    /// The plan in effect on `day`: the most recent live plan that had already started by then.
+    func plan(on day: Date) -> NutritionPlan? {
+        let startOfDay = Calendar.current.startOfDay(for: day)
+        return live.last { Calendar.current.startOfDay(for: $0.startsOn) <= startOfDay }
+    }
+
+    /// Classifies every live plan against `today`: the current plan is the most recent one that
+    /// has started; later ones are upcoming; earlier ones are past. Each plan runs until the day
+    /// before the next one starts.
+    func classified(today: Date) -> [ClassifiedNutritionPlan] {
+        let calendar = Calendar.current
+        let startOfToday = calendar.startOfDay(for: today)
+        let ordered = live
+        let current = ordered.last { calendar.startOfDay(for: $0.startsOn) <= startOfToday }
+
+        return ordered.enumerated().map { index, plan in
+            let next = index + 1 < ordered.count ? ordered[index + 1] : nil
+            let status: PlanStatus = calendar.startOfDay(for: plan.startsOn) > startOfToday
+                ? .upcoming
+                : (plan.id == current?.id ? .current : .past)
+            let endsOn = next.flatMap { calendar.date(byAdding: .day, value: -1, to: $0.startsOn) }
+            return ClassifiedNutritionPlan(plan: plan, status: status, endsOn: endsOn)
+        }
+    }
+}
+
 /// The full contents of a CalorieBuddy database, as exported/imported via JSON.
 ///
 /// Uses a custom decoder so that databases exported before `foodItems`/`recipes`/`mealPlan`
@@ -729,6 +828,7 @@ struct AppDatabase: Codable {
     var supplementLogs: [SupplementLogEntry]
     var stockLocations: [StockLocation]
     var mealPlan: MealPlan?
+    var nutritionPlans: [NutritionPlan]
 
     init(
         version: Int,
@@ -742,7 +842,8 @@ struct AppDatabase: Codable {
         supplements: [Supplement] = [],
         supplementLogs: [SupplementLogEntry] = [],
         stockLocations: [StockLocation] = [],
-        mealPlan: MealPlan? = nil
+        mealPlan: MealPlan? = nil,
+        nutritionPlans: [NutritionPlan] = []
     ) {
         self.version = version
         self.exportedAt = exportedAt
@@ -756,11 +857,12 @@ struct AppDatabase: Codable {
         self.supplementLogs = supplementLogs
         self.stockLocations = stockLocations
         self.mealPlan = mealPlan
+        self.nutritionPlans = nutritionPlans
     }
 
     private enum CodingKeys: String, CodingKey {
         case version, exportedAt, settings, entries, foodItems, recipes, stores,
-             supplementCategories, supplements, supplementLogs, stockLocations, mealPlan
+             supplementCategories, supplements, supplementLogs, stockLocations, mealPlan, nutritionPlans
     }
 
     init(from decoder: Decoder) throws {
@@ -777,5 +879,6 @@ struct AppDatabase: Codable {
         supplementLogs = try container.decodeIfPresent([SupplementLogEntry].self, forKey: .supplementLogs) ?? []
         stockLocations = try container.decodeIfPresent([StockLocation].self, forKey: .stockLocations) ?? []
         mealPlan = try container.decodeIfPresent(MealPlan.self, forKey: .mealPlan)
+        nutritionPlans = try container.decodeIfPresent([NutritionPlan].self, forKey: .nutritionPlans) ?? []
     }
 }

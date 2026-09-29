@@ -64,7 +64,10 @@ struct FoodCatalogListView: View {
                         }
                     }
                 }
-                .refreshable { store.reloadFromDisk() }
+                .refreshable {
+                    Haptics.light()
+                    store.reloadFromDisk()
+                }
             }
         }
         .navigationTitle("Catálogo de Alimentos")

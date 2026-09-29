@@ -35,7 +35,7 @@ enum FirebaseSetup {
 /// data must not be shared with third-party analytics.
 enum AppEvent {
     enum EntrySource: String {
-        case manual, barcode, catalog, recipe, mealPlan = "meal_plan", supplement
+        case manual, barcode, catalog, recipe, mealPlan = "meal_plan", supplement, aiImport = "ai_import"
     }
 
     case entryLogged(source: EntrySource, mealType: MealType?)

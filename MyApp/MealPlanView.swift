@@ -75,7 +75,10 @@ struct MealPlanView: View {
         }
         .navigationTitle("Plano Alimentar")
         .trackScreen("Plano Alimentar")
-        .refreshable { store.reloadFromDisk() }
+        .refreshable {
+            Haptics.light()
+            store.reloadFromDisk()
+        }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Menu {

@@ -6,5 +6,12 @@
 	     only sees SwiftUI's internal hosting-controller class names. -->
 	<key>FirebaseAutomaticScreenReportingEnabled</key>
 	<false/>
+	<!-- Black launch screen so there's no flash of white before the intro video/dark UI take
+	     over, matching the platform's own always-dark, black-backed IRONMAN look. -->
+	<key>UILaunchScreen</key>
+	<dict>
+		<key>UIColorName</key>
+		<string>LaunchBackground</string>
+	</dict>
 </dict>
 </plist>

@@ -82,6 +82,7 @@ struct HistoryView: View {
             await healthKit.refresh(days: daysLoaded)
         }
         .refreshable {
+            Haptics.light()
             await healthKit.refresh(days: daysLoaded)
         }
     }

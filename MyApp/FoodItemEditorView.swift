@@ -37,6 +37,8 @@ struct FoodItemEditorView: View {
     @State private var showVitamins = false
     @State private var vitamins: [NutrientValue] = []
 
+    @State private var showingJSONImport = false
+
     init(
         itemToEdit: FoodItem? = nil,
         initialBarcode: String? = nil,
@@ -181,12 +183,28 @@ struct FoodItemEditorView: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancelar") { dismiss() }
                 }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        showingJSONImport = true
+                    } label: {
+                        Label("Importar JSON (IA)", systemImage: "sparkles")
+                    }
+                }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Guardar") { save() }
                         .disabled(!isValid)
                 }
             }
             .onAppear(perform: populateIfEditing)
+            .sheet(isPresented: $showingJSONImport) {
+                JSONImportSheet(
+                    title: "Importar Alimento",
+                    exampleJSON: AIJSONImport.foodExample,
+                    instructions: "Pede a uma IA (ChatGPT ou semelhante) os valores nutricionais deste alimento neste formato — útil quando não há rótulo à mão. \"unit\": gram, kilogram, milliliter, liter ou unit. \"nutritionBasis\": \"per100\" se os valores forem por 100 g/ml (o normal num rótulo), ou \"perDose\" se forem por uma dose. Os campos brand, minerals e vitamins são opcionais. Também podes colar um array de vários alimentos — o primeiro preenche este formulário, os restantes são adicionados diretamente ao catálogo."
+                ) { json in
+                    try handleJSONImport(json)
+                }
+            }
             .sheet(isPresented: $showScanner) {
                 BarcodeScannerView { code in
                     if !barcodes.contains(code) {
@@ -234,6 +252,40 @@ struct FoodItemEditorView: View {
             values.wrappedValue.append(NutrientValue(name: "", amount: 0, unit: "mg"))
         } label: {
             Label("Adicionar", systemImage: "plus")
+        }
+    }
+
+    /// Applies AI-provided JSON to this form: the first food fills the fields for review before
+    /// saving, and any further ones (from a pasted array) are added straight to the catalog.
+    private func handleJSONImport(_ json: String) throws {
+        let payloads = try AIJSONImport.decodeFoodItems(from: json)
+        guard let first = payloads.first else { throw AIImportError.empty }
+        applyFoodPayload(first)
+        for extra in payloads.dropFirst() {
+            store.addFoodItem(extra.makeFoodItem())
+        }
+    }
+
+    private func applyFoodPayload(_ payload: FoodImportPayload) {
+        name = payload.name.trimmingCharacters(in: .whitespaces)
+        brand = payload.brand?.trimmingCharacters(in: .whitespaces) ?? ""
+        unit = payload.resolvedUnit
+        doseSizeText = formatted(payload.doseSize ?? 100)
+        nutritionBasis = payload.resolvedNutritionBasis
+        caloriesText = String(payload.calories)
+        proteinText = payload.protein.map { String($0) } ?? ""
+        carbsText = payload.carbs.map { String($0) } ?? ""
+        fatText = payload.fat.map { String($0) } ?? ""
+
+        let newMinerals = (payload.minerals ?? []).map { $0.makeNutrientValue() }
+        if !newMinerals.isEmpty {
+            minerals = newMinerals
+            showMinerals = true
+        }
+        let newVitamins = (payload.vitamins ?? []).map { $0.makeNutrientValue() }
+        if !newVitamins.isEmpty {
+            vitamins = newVitamins
+            showVitamins = true
         }
     }
 

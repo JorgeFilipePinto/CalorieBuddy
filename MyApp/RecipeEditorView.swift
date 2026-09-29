@@ -9,6 +9,7 @@ struct RecipeEditorView: View {
     @State private var name = ""
     @State private var items: [RecipeItem] = []
     @State private var showingAddComponent = false
+    @State private var showingJSONImport = false
 
     init(recipeToEdit: Recipe? = nil) {
         self.recipeToEdit = recipeToEdit
@@ -86,6 +87,13 @@ struct RecipeEditorView: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancelar") { dismiss() }
                 }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        showingJSONImport = true
+                    } label: {
+                        Label("Importar JSON (IA)", systemImage: "sparkles")
+                    }
+                }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Guardar") { save() }
                         .disabled(!isValid)
@@ -95,6 +103,15 @@ struct RecipeEditorView: View {
             .sheet(isPresented: $showingAddComponent) {
                 RecipeComponentPickerView(existingFoodIDs: Set(items.map(\.foodItemID))) { foodItemID, quantity in
                     items.append(RecipeItem(foodItemID: foodItemID, quantity: quantity))
+                }
+            }
+            .sheet(isPresented: $showingJSONImport) {
+                JSONImportSheet(
+                    title: "Importar Receita",
+                    exampleJSON: AIJSONImport.recipeExample,
+                    instructions: "Descreve a refeição a uma IA (ChatGPT ou semelhante) e pede-lhe este formato — útil quando não sabes ao detalhe o valor nutricional de cada componente. \"quantity\" é o número de doses de cada alimento. Um alimento com o mesmo nome de um já existente no catálogo é reutilizado em vez de criado outra vez."
+                ) { json in
+                    try handleJSONImport(json)
                 }
             }
         }
@@ -110,6 +127,30 @@ struct RecipeEditorView: View {
         guard let recipe = recipeToEdit else { return }
         name = recipe.name
         items = recipe.items
+    }
+
+    private func handleJSONImport(_ json: String) throws {
+        let payload = try AIJSONImport.decodeRecipe(from: json)
+        if name.trimmingCharacters(in: .whitespaces).isEmpty, let payloadName = payload.name {
+            name = payloadName.trimmingCharacters(in: .whitespaces)
+        }
+        for itemPayload in payload.items {
+            let food = resolvedFoodItem(for: itemPayload.food)
+            items.append(RecipeItem(foodItemID: food.id, quantity: itemPayload.quantity ?? 1))
+        }
+    }
+
+    /// Reuses an existing catalog food with the same name (case-insensitive) instead of creating
+    /// a duplicate every time the same ingredient shows up in another AI-generated recipe.
+    private func resolvedFoodItem(for payload: FoodImportPayload) -> FoodItem {
+        if let existing = store.foodItems.first(where: {
+            $0.name.localizedCaseInsensitiveCompare(payload.name) == .orderedSame
+        }) {
+            return existing
+        }
+        let newItem = payload.makeFoodItem()
+        store.addFoodItem(newItem)
+        return newItem
     }
 
     private func save() {
