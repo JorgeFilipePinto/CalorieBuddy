@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Screens are reported manually with `.trackScreen(_:)`; Firebase's automatic reporting
+	     only sees SwiftUI's internal hosting-controller class names. -->
+	<key>FirebaseAutomaticScreenReportingEnabled</key>
+	<false/>
+	<!-- Black launch screen so there's no flash of white before the intro video/dark UI take
+	     over, matching the platform's own always-dark, black-backed IRONMAN look. -->
+	<key>UILaunchScreen</key>
+	<dict>
+		<key>UIColorName</key>
+		<string>LaunchBackground</string>
+	</dict>
+</dict>
+</plist>

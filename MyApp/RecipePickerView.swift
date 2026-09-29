@@ -65,6 +65,7 @@ struct RecipePickerView: View {
                     Button("Registar") {
                         if let selectedRecipe {
                             store.logRecipe(selectedRecipe, mealType: mealType, date: date)
+                            AppAnalytics.log(.entryLogged(source: .recipe, mealType: mealType))
                         }
                         dismiss()
                     }

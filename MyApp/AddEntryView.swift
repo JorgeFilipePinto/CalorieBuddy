@@ -152,6 +152,7 @@ struct AddEntryView: View {
         )
         if entryToEdit == nil {
             store.addEntry(entry)
+            AppAnalytics.log(.entryLogged(source: barcode == nil ? .manual : .barcode, mealType: mealType))
         } else {
             store.updateEntry(entry)
         }

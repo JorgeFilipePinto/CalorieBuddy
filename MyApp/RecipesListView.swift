@@ -63,10 +63,14 @@ struct RecipesListView: View {
                         }
                     }
                 }
-                .refreshable { store.reloadFromDisk() }
+                .refreshable {
+                    Haptics.light()
+                    store.reloadFromDisk()
+                }
             }
         }
         .navigationTitle("Receitas")
+        .trackScreen("Receitas")
         .searchable(text: $searchText, prompt: "Procurar por nome")
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {

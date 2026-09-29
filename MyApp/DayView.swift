@@ -11,7 +11,11 @@ struct DayView: View {
     @State private var showingScannerEntry = false
     @State private var showingCatalogPicker = false
     @State private var showingRecipePicker = false
+    @State private var showingMealPlanPicker = false
     @State private var showingSupplementPicker = false
+    @State private var showingJSONImport = false
+    @State private var jsonImportGroupName = ""
+    @State private var jsonImportMealType: MealType = .lunch
     @State private var entryToEdit: FoodEntry?
 
     private var dayEntries: [FoodEntry] {
@@ -44,7 +48,16 @@ struct DayView: View {
 
     private var isToday: Bool { Calendar.current.isDateInToday(date) }
 
-    private var goal: Int { store.settings.dailyCalorieGoal }
+    /// A day counts as `training` when it has at least one logged workout — the same rule the
+    /// dashboard uses to pick which of the active plan's target sets applies.
+    private var dayType: DayType { dayWorkouts.isEmpty ? .rest : .training }
+
+    private var activeTargets: NutritionTargets? {
+        guard let plan = store.nutritionPlan(on: date) else { return nil }
+        return dayType == .training ? plan.training : plan.rest
+    }
+
+    private var goal: Int { activeTargets?.kcal ?? store.settings.dailyCalorieGoal }
 
     private var progress: Double {
         guard goal > 0 else { return 0 }
@@ -63,12 +76,14 @@ struct DayView: View {
                             .foregroundStyle(.secondary)
                     }
                     ProgressView(value: progress)
-                        .tint(totalCalories > goal ? .red : .accentColor)
+                        // Accent (IRONMAN red) while on track; a distinct warning colour once
+                        // over — reusing .red here would read the same as the on-track colour.
+                        .tint(totalCalories > goal ? .orange : .accentColor)
 
                     HStack(spacing: 16) {
-                        macroTile(title: "Proteína", value: totalProtein, goal: store.settings.proteinGoal, color: .blue)
-                        macroTile(title: "Hidratos", value: totalCarbs, goal: store.settings.carbsGoal, color: .orange)
-                        macroTile(title: "Gordura", value: totalFat, goal: store.settings.fatGoal, color: .pink)
+                        macroTile(title: "Proteína", value: totalProtein, goal: activeTargets.map { Double($0.proteinG) } ?? store.settings.proteinGoal, color: .blue)
+                        macroTile(title: "Hidratos", value: totalCarbs, goal: activeTargets.map { Double($0.carbsG) } ?? store.settings.carbsGoal, color: .orange)
+                        macroTile(title: "Gordura", value: totalFat, goal: activeTargets.map { Double($0.fatG) } ?? store.settings.fatGoal, color: .pink)
                     }
                     .padding(.top, 4)
 
@@ -168,6 +183,7 @@ struct DayView: View {
             }
         }
         .navigationTitle(title)
+        .trackScreen(isToday ? "Hoje" : "Dia")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Menu {
@@ -187,6 +203,11 @@ struct DayView: View {
                         Label("Do Catálogo", systemImage: "tray.full")
                     }
                     Button {
+                        showingMealPlanPicker = true
+                    } label: {
+                        Label("Do Plano Alimentar", systemImage: "list.clipboard")
+                    }
+                    Button {
                         showingRecipePicker = true
                     } label: {
                         Label("Registar Receita", systemImage: "list.bullet.rectangle")
@@ -195,6 +216,13 @@ struct DayView: View {
                         showingSupplementPicker = true
                     } label: {
                         Label("Suplemento", systemImage: "pills.fill")
+                    }
+                    Button {
+                        jsonImportGroupName = ""
+                        jsonImportMealType = MealType.suggested(for: date)
+                        showingJSONImport = true
+                    } label: {
+                        Label("Importar JSON (IA)", systemImage: "sparkles")
                     }
                 } label: {
                     Image(systemName: "plus")
@@ -213,11 +241,36 @@ struct DayView: View {
         .sheet(isPresented: $showingRecipePicker) {
             RecipePickerView(date: date)
         }
+        .sheet(isPresented: $showingMealPlanPicker) {
+            MealPlanPickerView(date: date)
+        }
         .sheet(isPresented: $showingSupplementPicker) {
             SupplementPickerView(date: date)
         }
         .sheet(item: $entryToEdit) { entry in
             AddEntryView(entryToEdit: entry)
+        }
+        .sheet(isPresented: $showingJSONImport) {
+            JSONImportSheet(
+                title: "Importar Registo",
+                exampleJSON: AIJSONImport.diaryExample,
+                instructions: "Descreve o que comeste a uma IA (ChatGPT ou semelhante) — ou envia-lhe uma foto do prato — e pede-lhe este formato para não teres de estimar os valores à mão. Podes colar um array de várias entradas ou só uma.",
+                additionalFields: {
+                    Section("Refeição") {
+                        TextField("Nome (ex.: Almoço fora)", text: $jsonImportGroupName)
+                        Picker("Tipo de Refeição", selection: $jsonImportMealType) {
+                            ForEach(MealType.allCases) { meal in
+                                Label(meal.displayName, systemImage: meal.symbolName).tag(meal)
+                            }
+                        }
+                    }
+                },
+                isReadyToImport: {
+                    !jsonImportGroupName.trimmingCharacters(in: .whitespaces).isEmpty
+                }
+            ) { json in
+                try handleDiaryJSONImport(json)
+            }
         }
         .onAppear {
             Task {
@@ -226,6 +279,7 @@ struct DayView: View {
             }
         }
         .refreshable {
+            Haptics.light()
             await healthKit.refresh(days: daysNeededToCoverDate)
         }
     }
@@ -261,7 +315,7 @@ struct DayView: View {
 
     private var waterRow: some View {
         let waterML = Int((healthKit.waterLiters(on: date) * 1000).rounded())
-        let goal = store.settings.dailyWaterGoalML
+        let goal = activeTargets?.waterML ?? store.settings.dailyWaterGoalML
         return VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Label("\(waterML) ml", systemImage: "drop.fill")
@@ -397,6 +451,24 @@ struct DayView: View {
         quantity.truncatingRemainder(dividingBy: 1) == 0
             ? String(Int(quantity))
             : String(format: "%.2f", quantity)
+    }
+
+    private func handleDiaryJSONImport(_ json: String) throws {
+        let payloads = try AIJSONImport.decodeDiaryEntries(from: json)
+        guard !payloads.isEmpty else { throw AIImportError.empty }
+        let newEntries = payloads.map { entryPayload in
+            FoodEntry(
+                name: entryPayload.name.trimmingCharacters(in: .whitespaces),
+                calories: entryPayload.calories,
+                protein: entryPayload.protein,
+                carbs: entryPayload.carbs,
+                fat: entryPayload.fat,
+                mealType: jsonImportMealType,
+                date: date
+            )
+        }
+        store.addImportedEntries(newEntries, groupName: jsonImportGroupName)
+        AppAnalytics.log(.entryLogged(source: .aiImport, mealType: jsonImportMealType))
     }
 
     private func entryRow(_ entry: FoodEntry) -> some View {

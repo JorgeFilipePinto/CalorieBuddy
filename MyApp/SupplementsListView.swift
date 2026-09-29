@@ -55,6 +55,7 @@ struct SupplementsListView: View {
             }
         }
         .navigationTitle("Suplementos")
+        .trackScreen("Suplementos")
         .searchable(text: $searchText, prompt: "Procurar por nome")
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {

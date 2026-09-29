@@ -64,10 +64,14 @@ struct FoodCatalogListView: View {
                         }
                     }
                 }
-                .refreshable { store.reloadFromDisk() }
+                .refreshable {
+                    Haptics.light()
+                    store.reloadFromDisk()
+                }
             }
         }
         .navigationTitle("Catálogo de Alimentos")
+        .trackScreen("Catálogo de Alimentos")
         .searchable(text: $searchText, prompt: "Procurar por nome")
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {

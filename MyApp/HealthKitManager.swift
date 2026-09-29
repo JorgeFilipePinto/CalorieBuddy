@@ -21,7 +21,7 @@ final class HealthKitManager {
 
     /// A coarse workout category, independent of HealthKit's much larger `HKWorkoutActivityType`
     /// enum, with a Portuguese label and SF Symbol ready for display.
-    enum WorkoutKind {
+    enum WorkoutKind: CaseIterable {
         case running, walking, hiking, cycling, swimming, strengthTraining, functionalTraining, yoga, elliptical, rowing, dance, other
 
         var displayName: String {
@@ -67,6 +67,25 @@ final class HealthKitManager {
         let duration: TimeInterval
         let caloriesBurned: Double?
     }
+
+    /// One workout as needed for personal records: its totals plus, for runs, rides and swims,
+    /// the fastest time over each standard distance (`PersonalRecords.bestEffortDistances`)
+    /// covered within it.
+    struct RecordWorkout: Identifiable {
+        let id: UUID
+        let kind: WorkoutKind
+        let startDate: Date
+        let duration: TimeInterval
+        let distanceMeters: Double?
+        let caloriesBurned: Double?
+        /// Fastest time (s) per standard distance (m).
+        let bestEfforts: [Double: TimeInterval]
+    }
+
+    /// Every workout ever recorded in Apple Health, for the personal-records screen. Loaded on
+    /// demand by `loadRecordWorkouts()`, since it spans all history rather than a date range.
+    private(set) var recordWorkouts: [RecordWorkout] = []
+    private(set) var isLoadingRecords = false
 
     /// Litres of water logged per calendar day (key = start of day).
     private(set) var waterLitersByDay: [Date: Double] = [:]
@@ -140,6 +159,14 @@ final class HealthKitManager {
     private let activeEnergyType = HKQuantityType.quantityType(forIdentifier: .activeEnergyBurned)!
     private let caffeineType = HKQuantityType.quantityType(forIdentifier: .dietaryCaffeine)!
     private let sleepType = HKObjectType.categoryType(forIdentifier: .sleepAnalysis)!
+    private let runningDistanceType = HKQuantityType.quantityType(forIdentifier: .distanceWalkingRunning)!
+    private let cyclingDistanceType = HKQuantityType.quantityType(forIdentifier: .distanceCycling)!
+    private let swimmingDistanceType = HKQuantityType.quantityType(forIdentifier: .distanceSwimming)!
+    private let rowingDistanceType = HKQuantityType.quantityType(forIdentifier: .distanceRowing)!
+
+    /// Best efforts already computed per workout — they never change, and computing them needs
+    /// one distance-samples query per run, so reopening the records screen shouldn't redo it.
+    private var bestEffortsCache: [UUID: [Double: TimeInterval]] = [:]
 
     var isSupported: Bool { HKHealthStore.isHealthDataAvailable() }
 
@@ -165,7 +192,10 @@ final class HealthKitManager {
         do {
             try await store.requestAuthorization(
                 toShare: [weightType, waterType, caffeineType],
-                read: [weightType, bodyFatType, bmiType, waterType, activeEnergyType, caffeineType, sleepType, HKObjectType.workoutType()]
+                read: [
+                    weightType, bodyFatType, bmiType, waterType, activeEnergyType, caffeineType, sleepType,
+                    HKObjectType.workoutType(), runningDistanceType, cyclingDistanceType, swimmingDistanceType, rowingDistanceType
+                ]
             )
             await refresh()
         } catch {
@@ -336,6 +366,80 @@ final class HealthKitManager {
         return totals
     }
 
+    private func distanceType(for kind: WorkoutKind) -> HKQuantityType? {
+        switch kind {
+        case .running, .walking, .hiking: return runningDistanceType
+        case .cycling: return cyclingDistanceType
+        case .swimming: return swimmingDistanceType
+        case .rowing: return rowingDistanceType
+        default: return nil
+        }
+    }
+
+    /// Loads every workout in Apple Health (all history) into `recordWorkouts`, computing the
+    /// best efforts of each run from its distance samples.
+    func loadRecordWorkouts() async {
+        guard isSupported, !isLoadingRecords else { return }
+        isLoadingRecords = true
+        defer { isLoadingRecords = false }
+
+        let descriptor = HKSampleQueryDescriptor(
+            predicates: [.workout()],
+            sortDescriptors: [SortDescriptor(\HKWorkout.startDate, order: .reverse)]
+        )
+        guard let workouts = try? await descriptor.result(for: store) else { return }
+
+        var records: [RecordWorkout] = []
+        for workout in workouts {
+            let kind = Self.workoutKind(for: workout.workoutActivityType)
+            let distance = distanceType(for: kind)
+                .flatMap { workout.statistics(for: $0)?.sumQuantity()?.doubleValue(for: .meter()) }
+                .flatMap { $0 > 0 ? $0 : nil }
+            var efforts: [Double: TimeInterval] = [:]
+            let targets = PersonalRecords.bestEffortDistances(for: kind).filter { $0 <= (distance ?? 0) }
+            if !targets.isEmpty, let type = distanceType(for: kind) {
+                if let cached = bestEffortsCache[workout.uuid] {
+                    efforts = cached
+                } else {
+                    efforts = await bestEfforts(in: workout, type: type, targets: targets)
+                    bestEffortsCache[workout.uuid] = efforts
+                }
+            }
+            records.append(RecordWorkout(
+                id: workout.uuid,
+                kind: kind,
+                startDate: workout.startDate,
+                duration: workout.duration,
+                distanceMeters: distance,
+                caloriesBurned: workout.statistics(for: activeEnergyType)?.sumQuantity()?.doubleValue(for: .kilocalorie()),
+                bestEfforts: efforts
+            ))
+        }
+        recordWorkouts = records
+    }
+
+    /// Fastest time over each of `targets` metres within one workout, from the distance samples
+    /// (of `type`) the Watch/iPhone recorded during it — every few seconds for runs and rides,
+    /// one per length for pool swims.
+    private func bestEfforts(in workout: HKWorkout, type: HKQuantityType, targets: [Double]) async -> [Double: TimeInterval] {
+        let descriptor = HKSampleQueryDescriptor(
+            predicates: [.quantitySample(type: type, predicate: HKQuery.predicateForObjects(from: workout))],
+            sortDescriptors: [SortDescriptor(\HKQuantitySample.startDate, order: .forward)]
+        )
+        guard let samples = try? await descriptor.result(for: store), let first = samples.first else { return [:] }
+        var times = [first.startDate.timeIntervalSinceReferenceDate]
+        var cumulative = [0.0]
+        for sample in samples {
+            cumulative.append(cumulative[cumulative.count - 1] + sample.quantity.doubleValue(for: .meter()))
+            times.append(sample.endDate.timeIntervalSinceReferenceDate)
+        }
+        return PersonalRecords.bestEfforts(
+            times: times,
+            cumulativeDistances: cumulative,
+            targets: targets
+        )
+    }
+
     /// Workouts (runs, gym sessions, walks, ...) over the last `days` days, grouped by the
     /// calendar day each one started on.
     private func fetchWorkoutsByDay(days: Int) async -> [Date: [WorkoutSummary]] {
@@ -372,5 +476,6 @@ final class HealthKitManager {
     func logWeight(kilograms: Double) async {}
     func logCoffee() async {}
     func removeLastCoffee(on day: Date) async {}
+    func loadRecordWorkouts() async {}
     #endif
 }

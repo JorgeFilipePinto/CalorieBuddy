@@ -125,6 +125,7 @@ struct TrendsView: View {
             }
         }
         .navigationTitle("Evolução")
+        .trackScreen("Evolução")
         .navigationBarHidden(isLandscapeFullScreen)
         .task(id: rangeDays) {
             isLoading = true
@@ -133,6 +134,7 @@ struct TrendsView: View {
             isLoading = false
         }
         .refreshable {
+            Haptics.light()
             await healthKit.refresh(days: fetchDays)
         }
     }
