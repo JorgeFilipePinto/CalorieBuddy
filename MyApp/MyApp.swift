@@ -17,12 +17,8 @@ struct MyApp: App {
     @Environment(\.scenePhase) private var scenePhase
     @State private var store = DataStore()
     @State private var healthKit = HealthKitManager()
-    @State private var cloudBackup = CloudBackupManager()
+    @State private var platformSync = PlatformSyncManager()
     @State private var entryPhase: AppEntryPhase = .intro
-
-    init() {
-        FirebaseSetup.configureIfAvailable()
-    }
 
     var body: some Scene {
         WindowGroup {
@@ -31,8 +27,7 @@ struct MyApp: App {
                     ContentView()
                         .environment(store)
                         .environment(healthKit)
-                        .environment(cloudBackup)
-                        .onAppear { cloudBackup.start() }
+                        .environment(platformSync)
                 }
 
                 switch entryPhase {
@@ -55,8 +50,14 @@ struct MyApp: App {
             .preferredColorScheme(.dark)
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .background {
-                Task { await cloudBackup.autoBackUpIfEnabled(store) }
+            switch phase {
+            case .background:
+                Task { await platformSync.autoSyncIfEnabled(store: store, healthKit: healthKit) }
+            case .active:
+                // Also on opening, to pick up plans the nutritionist changed on the dashboard.
+                Task { await platformSync.autoSyncIfEnabled(store: store, healthKit: healthKit, minimumInterval: 15 * 60) }
+            default:
+                break
             }
         }
     }

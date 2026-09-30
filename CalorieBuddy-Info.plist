@@ -2,10 +2,13 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- Screens are reported manually with `.trackScreen(_:)`; Firebase's automatic reporting
-	     only sees SwiftUI's internal hosting-controller class names. -->
-	<key>FirebaseAutomaticScreenReportingEnabled</key>
-	<false/>
+	<!-- Plain HTTP only to local-network hosts: the local Supabase stack during development
+	     (http://127.0.0.1:54321, or the Mac's .local name from an iPhone). Production is HTTPS. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 	<!-- Black launch screen so there's no flash of white before the intro video/dark UI take
 	     over, matching the platform's own always-dark, black-backed IRONMAN look. -->
 	<key>UILaunchScreen</key>

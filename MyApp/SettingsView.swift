@@ -32,12 +32,12 @@ struct SettingsView: View {
 
             Section {
                 NavigationLink {
-                    CloudBackupView()
+                    PlatformSyncView()
                 } label: {
-                    Label("Nuvem e Estatísticas", systemImage: "icloud")
+                    Label("Plataforma e Sincronização", systemImage: "arrow.triangle.2.circlepath.icloud")
                 }
             } footer: {
-                Text("Backup automático da base de dados na Firebase e estatísticas de uso.")
+                Text("Sincroniza o diário, os planos e os dados da app Saúde com o dashboard da plataforma IronMan Project, com backup de toda a base de dados.")
             }
 
             Section {
@@ -223,5 +223,5 @@ struct SettingsView: View {
         SettingsView()
     }
     .environment(DataStore())
-    .environment(CloudBackupManager())
+    .environment(PlatformSyncManager())
 }

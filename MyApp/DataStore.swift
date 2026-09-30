@@ -686,6 +686,22 @@ final class DataStore {
     func deleteNutritionPlan(_ plan: NutritionPlan) {
         guard let index = nutritionPlans.firstIndex(where: { $0.id == plan.id }) else { return }
         nutritionPlans[index].deletedAt = Date()
+        nutritionPlans[index].updatedAt = Date()
+        persistActive()
+    }
+
+    /// Applies plans pulled from the platform (created or edited on the dashboard), replacing the
+    /// local ones with the same id as they are — `updatedAt` included, so the sync doesn't treat
+    /// them as local edits and send them back.
+    func applyRemoteNutritionPlans(_ plans: [NutritionPlan]) {
+        guard !plans.isEmpty else { return }
+        for plan in plans {
+            if let index = nutritionPlans.firstIndex(where: { $0.id == plan.id }) {
+                nutritionPlans[index] = plan
+            } else {
+                nutritionPlans.append(plan)
+            }
+        }
         persistActive()
     }
 
@@ -822,14 +838,14 @@ final class DataStore {
         adoptAsActive(editedDatabase)
     }
 
-    // MARK: - Cloud sync
+    // MARK: - Platform sync
 
-    /// The whole database as a value, e.g. for syncing it to the cloud.
+    /// The whole database as a value, e.g. for syncing it to the platform.
     func databaseSnapshot() -> AppDatabase {
         currentDatabase()
     }
 
-    /// Replaces the active database with `database` (e.g. restored from the cloud). The database
+    /// Replaces the active database with `database` (e.g. restored from the platform). The database
     /// that was active until now is preserved as the backup first, like importing a file.
     func replaceDatabase(with database: AppDatabase) {
         adoptAsActive(database)
