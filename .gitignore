@@ -7,3 +7,7 @@ xcuserdata/
 DerivedData/
 .DS_Store
 GoogleService-Info.plist
+
+# Platform connection per build configuration (template: Config/Supabase.example.plist)
+MyApp/Supabase-Debug.plist
+MyApp/Supabase-Release.plist

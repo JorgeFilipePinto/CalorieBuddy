@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Observation
 #if canImport(HealthKit) && os(iOS)
@@ -82,6 +83,74 @@ final class HealthKitManager {
         let bestEfforts: [Double: TimeInterval]
     }
 
+    /// One `health_samples` row for the platform sync (see `syncPayload(from:to:)`).
+    struct SyncSample {
+        let id: UUID
+        let type: String
+        let start: Date
+        let end: Date
+        let value: Double
+        let unit: String
+
+        var row: [String: Any] {
+            ["id": id.uuidString, "type": type, "start_at": SupabaseClient.timestamp(start),
+             "end_at": SupabaseClient.timestamp(end), "value": (value * 100).rounded() / 100, "unit": unit]
+        }
+    }
+
+    /// One `workouts` row for the platform sync.
+    struct SyncWorkout {
+        let id: UUID
+        let activityType: String
+        let name: String
+        let start: Date
+        let durationSeconds: Int
+        let distanceMeters: Double?
+        let averageHeartRate: Int?
+        let energyKcal: Double?
+
+        var row: [String: Any] {
+            ["id": id.uuidString, "activity_type": activityType, "name": name,
+             "started_at": SupabaseClient.timestamp(start), "duration_s": durationSeconds,
+             "distance_m": distanceMeters.map { ($0 * 10).rounded() / 10 } ?? NSNull(),
+             "avg_heart_rate": averageHeartRate ?? NSNull(),
+             "energy_kcal": energyKcal.map { ($0 * 10).rounded() / 10 } ?? NSNull()]
+        }
+    }
+
+    /// Everything Apple Health holds for one sync window.
+    struct SyncPayload {
+        let samples: [SyncSample]
+        let workouts: [SyncWorkout]
+    }
+
+    /// The `health_samples` types the sync owns: each window replaces all of them.
+    static let syncedSampleTypes = [
+        "water", "active_energy", "basal_energy", "weight", "body_fat",
+        "sleep_in_bed", "sleep_core", "sleep_deep", "sleep_rem", "sleep_awake"
+    ]
+
+    /// A stable id for an aggregated bucket (type + start), so re-sending it updates the same row.
+    private static func bucketID(type: String, start: Date) -> UUID {
+        var bytes = Array(SHA256.hash(data: Data("CalorieBuddy.health.\(type).\(Int(start.timeIntervalSince1970))".utf8)).prefix(16))
+        bytes[6] = (bytes[6] & 0x0F) | 0x50 // version 5 (name-based)
+        bytes[8] = (bytes[8] & 0x3F) | 0x80 // RFC 4122 variant
+        return UUID(uuid: (bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                           bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]))
+    }
+
+    /// The platform's activity categories (`workouts.activity_type`).
+    private static func platformActivityType(for kind: WorkoutKind) -> String {
+        switch kind {
+        case .running: return "run"
+        case .cycling: return "bike"
+        case .swimming: return "swim"
+        case .strengthTraining, .functionalTraining: return "strength"
+        case .walking, .hiking: return "walk"
+        case .yoga, .elliptical, .rowing, .dance, .other: return "other"
+        }
+    }
+
     /// Every workout ever recorded in Apple Health, for the personal-records screen. Loaded on
     /// demand by `loadRecordWorkouts()`, since it spans all history rather than a date range.
     private(set) var recordWorkouts: [RecordWorkout] = []
@@ -157,6 +226,8 @@ final class HealthKitManager {
     private let bmiType = HKQuantityType.quantityType(forIdentifier: .bodyMassIndex)!
     private let waterType = HKQuantityType.quantityType(forIdentifier: .dietaryWater)!
     private let activeEnergyType = HKQuantityType.quantityType(forIdentifier: .activeEnergyBurned)!
+    private let basalEnergyType = HKQuantityType.quantityType(forIdentifier: .basalEnergyBurned)!
+    private let heartRateType = HKQuantityType.quantityType(forIdentifier: .heartRate)!
     private let caffeineType = HKQuantityType.quantityType(forIdentifier: .dietaryCaffeine)!
     private let sleepType = HKObjectType.categoryType(forIdentifier: .sleepAnalysis)!
     private let runningDistanceType = HKQuantityType.quantityType(forIdentifier: .distanceWalkingRunning)!
@@ -193,8 +264,8 @@ final class HealthKitManager {
             try await store.requestAuthorization(
                 toShare: [weightType, waterType, caffeineType],
                 read: [
-                    weightType, bodyFatType, bmiType, waterType, activeEnergyType, caffeineType, sleepType,
-                    HKObjectType.workoutType(), runningDistanceType, cyclingDistanceType, swimmingDistanceType, rowingDistanceType
+                    weightType, bodyFatType, bmiType, waterType, activeEnergyType, basalEnergyType, heartRateType,
+                    caffeineType, sleepType, HKObjectType.workoutType(), runningDistanceType, cyclingDistanceType, swimmingDistanceType, rowingDistanceType
                 ]
             )
             await refresh()
@@ -468,6 +539,146 @@ final class HealthKitManager {
         }
         return byDay
     }
+
+    // MARK: Platform sync
+
+    /// Everything Apple Health holds that starts in [`from`, `to`), shaped as the platform's
+    /// `health_samples` / `workouts` rows. Throws (instead of returning less) when Health can't be
+    /// read — e.g. the iPhone is locked — so the sync never mistakes "unreadable" for "deleted".
+    ///
+    /// - Water and energy are summed per hour with HealthKit's statistics, which de-duplicate
+    ///   overlapping sources (iPhone + Watch); raw samples would count the same kcal twice.
+    /// - Sleep keeps, for each night, the stages of the one source that recorded the most sleep
+    ///   (usually the Watch), plus every "in bed" interval (the dashboard only uses their edges).
+    func syncPayload(from: Date, to: Date) async throws -> SyncPayload? {
+        guard isSupported else { return nil }
+        var samples: [SyncSample] = []
+        samples += try await hourlyBuckets(of: waterType, unit: .literUnit(with: .milli), as: "water", platformUnit: "ml", from: from, to: to)
+        samples += try await hourlyBuckets(of: activeEnergyType, unit: .kilocalorie(), as: "active_energy", platformUnit: "kcal", from: from, to: to)
+        samples += try await hourlyBuckets(of: basalEnergyType, unit: .kilocalorie(), as: "basal_energy", platformUnit: "kcal", from: from, to: to)
+        samples += try await quantitySamples(of: weightType, unit: .gramUnit(with: .kilo), scale: 1, as: "weight", platformUnit: "kg", from: from, to: to)
+        samples += try await quantitySamples(of: bodyFatType, unit: .percent(), scale: 100, as: "body_fat", platformUnit: "%", from: from, to: to)
+        samples += try await sleepSamples(from: from, to: to)
+        return SyncPayload(samples: samples, workouts: try await syncWorkouts(from: from, to: to))
+    }
+
+    private func windowPredicate(from: Date, to: Date) -> NSPredicate {
+        HKQuery.predicateForSamples(withStart: from, end: to, options: .strictStartDate)
+    }
+
+    private func hourlyBuckets(of type: HKQuantityType, unit: HKUnit, as platformType: String, platformUnit: String,
+                               from: Date, to: Date) async throws -> [SyncSample] {
+        try await withCheckedThrowingContinuation { continuation in
+            let query = HKStatisticsCollectionQuery(
+                quantityType: type,
+                quantitySamplePredicate: HKQuery.predicateForSamples(withStart: from, end: to),
+                options: .cumulativeSum,
+                anchorDate: from,
+                intervalComponents: DateComponents(hour: 1)
+            )
+            query.initialResultsHandler = { _, results, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                    return
+                }
+                var buckets: [SyncSample] = []
+                results?.enumerateStatistics(from: from, to: to) { statistics, _ in
+                    guard statistics.startDate >= from, statistics.startDate < to,
+                          let sum = statistics.sumQuantity()?.doubleValue(for: unit), sum > 0 else { return }
+                    buckets.append(SyncSample(
+                        id: Self.bucketID(type: platformType, start: statistics.startDate),
+                        type: platformType,
+                        start: statistics.startDate,
+                        // Inside the hour, so the bucket counts for the day it started on.
+                        end: statistics.endDate.addingTimeInterval(-1),
+                        value: sum,
+                        unit: platformUnit
+                    ))
+                }
+                continuation.resume(returning: buckets)
+            }
+            store.execute(query)
+        }
+    }
+
+    private func quantitySamples(of type: HKQuantityType, unit: HKUnit, scale: Double, as platformType: String,
+                                 platformUnit: String, from: Date, to: Date) async throws -> [SyncSample] {
+        let descriptor = HKSampleQueryDescriptor(
+            predicates: [.quantitySample(type: type, predicate: windowPredicate(from: from, to: to))],
+            sortDescriptors: [SortDescriptor(\HKQuantitySample.startDate, order: .forward)]
+        )
+        return try await descriptor.result(for: store).map { sample in
+            SyncSample(id: sample.uuid, type: platformType, start: sample.startDate, end: sample.endDate,
+                       value: sample.quantity.doubleValue(for: unit) * scale, unit: platformUnit)
+        }
+    }
+
+    private func sleepSamples(from: Date, to: Date) async throws -> [SyncSample] {
+        let descriptor = HKSampleQueryDescriptor(
+            predicates: [.categorySample(type: sleepType, predicate: windowPredicate(from: from, to: to))],
+            sortDescriptors: [SortDescriptor(\HKCategorySample.startDate, order: .forward)]
+        )
+        let samples = try await descriptor.result(for: store)
+
+        func platformType(_ value: Int) -> String? {
+            switch HKCategoryValueSleepAnalysis(rawValue: value) {
+            case .inBed: return "sleep_in_bed"
+            case .asleepCore, .asleepUnspecified: return "sleep_core"
+            case .asleepDeep: return "sleep_deep"
+            case .asleepREM: return "sleep_rem"
+            case .awake: return "sleep_awake"
+            default: return nil
+            }
+        }
+        // The night a sample belongs to, like the database's sleep_day(): anything ending after
+        // 18:00 counts for the next morning.
+        let calendar = Calendar.current
+        func night(_ sample: HKCategorySample) -> Date {
+            calendar.startOfDay(for: sample.endDate.addingTimeInterval(6 * 3600))
+        }
+        func source(_ sample: HKCategorySample) -> String { sample.sourceRevision.source.bundleIdentifier }
+
+        var asleepMinutes: [Date: [String: Double]] = [:]
+        for sample in samples {
+            guard let type = platformType(sample.value), type != "sleep_in_bed", type != "sleep_awake" else { continue }
+            asleepMinutes[night(sample), default: [:]][source(sample), default: 0] += sample.endDate.timeIntervalSince(sample.startDate) / 60
+        }
+        let chosenSource = asleepMinutes.mapValues { bySource in bySource.max { $0.value < $1.value }?.key }
+
+        return samples.compactMap { sample in
+            guard let type = platformType(sample.value) else { return nil }
+            if type != "sleep_in_bed", chosenSource[night(sample)] ?? nil != source(sample) { return nil }
+            return SyncSample(id: sample.uuid, type: type, start: sample.startDate, end: sample.endDate,
+                              value: sample.endDate.timeIntervalSince(sample.startDate) / 60, unit: "min")
+        }
+    }
+
+    private func syncWorkouts(from: Date, to: Date) async throws -> [SyncWorkout] {
+        let descriptor = HKSampleQueryDescriptor(
+            predicates: [.workout(windowPredicate(from: from, to: to))],
+            sortDescriptors: [SortDescriptor(\HKWorkout.startDate, order: .forward)]
+        )
+        let beatsPerMinute = HKUnit.count().unitDivided(by: .minute())
+        return try await descriptor.result(for: store).map { workout in
+            let kind = Self.workoutKind(for: workout.workoutActivityType)
+            let distance = distanceType(for: kind)
+                .flatMap { workout.statistics(for: $0)?.sumQuantity()?.doubleValue(for: .meter()) }
+                .flatMap { $0 > 0 ? $0 : nil }
+            let heartRate = workout.statistics(for: heartRateType)?.averageQuantity()
+                .map { Int($0.doubleValue(for: beatsPerMinute).rounded()) }
+                .flatMap { (30...250).contains($0) ? $0 : nil }
+            return SyncWorkout(
+                id: workout.uuid,
+                activityType: Self.platformActivityType(for: kind),
+                name: kind.displayName,
+                start: workout.startDate,
+                durationSeconds: max(1, Int(workout.duration.rounded())),
+                distanceMeters: distance,
+                averageHeartRate: heartRate,
+                energyKcal: workout.statistics(for: activeEnergyType)?.sumQuantity()?.doubleValue(for: .kilocalorie())
+            )
+        }
+    }
     #else
     var isSupported: Bool { false }
     func requestAuthorization() async {}
@@ -477,5 +688,6 @@ final class HealthKitManager {
     func logCoffee() async {}
     func removeLastCoffee(on day: Date) async {}
     func loadRecordWorkouts() async {}
+    func syncPayload(from: Date, to: Date) async throws -> SyncPayload? { nil }
     #endif
 }
