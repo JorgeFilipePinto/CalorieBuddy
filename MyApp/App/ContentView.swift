@@ -2,11 +2,13 @@ import SwiftUI
 
 struct ContentView: View {
     @State private var selectedTab = 0
+    /// The day shown on "Hoje" (`nil` = today), stepped with the arrows in its title.
+    @State private var selectedDay: Date?
 
     var body: some View {
         TabView(selection: $selectedTab) {
             NavigationStack {
-                DayView(date: .now)
+                DayView(selectedDay: $selectedDay)
             }
             .tabItem { Label("Hoje", systemImage: "sun.max") }
             .tag(0)

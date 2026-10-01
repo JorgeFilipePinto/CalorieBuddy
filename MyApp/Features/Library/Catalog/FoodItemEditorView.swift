@@ -199,8 +199,8 @@ struct FoodItemEditorView: View {
             .sheet(isPresented: $showingJSONImport) {
                 JSONImportSheet(
                     title: "Importar Alimento",
-                    exampleJSON: AIJSONImport.foodExample,
-                    instructions: "Pede a uma IA (ChatGPT ou semelhante) os valores nutricionais deste alimento neste formato — útil quando não há rótulo à mão. \"unit\": gram, kilogram, milliliter, liter ou unit. \"nutritionBasis\": \"per100\" se os valores forem por 100 g/ml (o normal num rótulo), ou \"perDose\" se forem por uma dose. Os campos brand, minerals e vitamins são opcionais. Também podes colar um array de vários alimentos — o primeiro preenche este formulário, os restantes são adicionados diretamente ao catálogo."
+                    prompt: AIJSONImport.foodPrompt,
+                    instructions: "Útil quando não há rótulo à mão. Se a resposta tiver vários alimentos, o primeiro preenche este formulário e os restantes são adicionados diretamente ao catálogo."
                 ) { json in
                     try handleJSONImport(json)
                 }
@@ -262,7 +262,7 @@ struct FoodItemEditorView: View {
         guard let first = payloads.first else { throw AIImportError.empty }
         applyFoodPayload(first)
         for extra in payloads.dropFirst() {
-            store.addFoodItem(extra.makeFoodItem())
+            store.catalogFood(for: extra)
         }
     }
 

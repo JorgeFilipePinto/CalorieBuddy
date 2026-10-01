@@ -35,6 +35,7 @@ struct SupplementEditorView: View {
     @State private var stocks: [SupplementStock] = []
     @State private var lowStockThresholdText = ""
     @State private var editingStock: StockEditTarget?
+    @State private var showingJSONImport = false
 
     private struct StockEditTarget: Identifiable { let id: UUID }
 
@@ -238,12 +239,28 @@ struct SupplementEditorView: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancelar") { dismiss() }
                 }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        showingJSONImport = true
+                    } label: {
+                        Label("Importar JSON (IA)", systemImage: "sparkles")
+                    }
+                }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Guardar") { save() }
                         .disabled(!isValid)
                 }
             }
             .onAppear(perform: populateIfEditing)
+            .sheet(isPresented: $showingJSONImport) {
+                JSONImportSheet(
+                    title: "Importar Suplemento",
+                    prompt: AIJSONImport.supplementPrompt(categories: store.supplementCategories.map(\.name)),
+                    instructions: "Útil para preencher a embalagem, a dose e os macros a partir do rótulo. Se a resposta tiver vários suplementos, o primeiro preenche este formulário e os restantes são adicionados diretamente."
+                ) { json in
+                    try handleJSONImport(json)
+                }
+            }
             .sheet(isPresented: $showingCategoryPicker) {
                 SupplementCategoryPickerView(selectedCategoryID: $categoryID)
             }
@@ -300,6 +317,27 @@ struct SupplementEditorView: View {
         prices = supplement.prices
         stocks = supplement.stocks
         lowStockThresholdText = supplement.lowStockThreshold.map(formatted) ?? ""
+    }
+
+    /// The first supplement in the AI's answer fills this form (prices and stocks entered here are
+    /// kept); any others are added straight to the list.
+    private func handleJSONImport(_ json: String) throws {
+        let payloads = try AIJSONImport.decodeSupplements(from: json)
+        guard let first = payloads.first else { throw AIImportError.empty }
+        name = first.name.trimmingCharacters(in: .whitespaces)
+        categoryID = store.supplementCategory(named: first.category).id
+        unit = first.resolvedUnit
+        totalSizeText = formatted(first.resolvedTotalSize)
+        doseMode = .doseWeight
+        doseSizeText = formatted(first.resolvedDoseSize)
+        doseCountText = formatted(first.resolvedTotalSize / first.resolvedDoseSize)
+        caloriesText = first.calories.map(String.init) ?? ""
+        proteinText = first.protein.map { String($0) } ?? ""
+        carbsText = first.carbs.map { String($0) } ?? ""
+        fatText = first.fat.map { String($0) } ?? ""
+        for extra in payloads.dropFirst() {
+            store.catalogSupplement(for: extra)
+        }
     }
 
     private func save() {

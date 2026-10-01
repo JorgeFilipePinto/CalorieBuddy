@@ -5,6 +5,8 @@ struct RecipesListView: View {
     @Environment(DataStore.self) private var store
 
     @State private var showingAddRecipe = false
+    @State private var showingJSONImport = false
+    @State private var jsonImportName = ""
     @State private var recipeToEdit: Recipe?
     @State private var searchText = ""
     @State private var sortOrder: ItemSortOrder = .name
@@ -82,8 +84,18 @@ struct RecipesListView: View {
                 .pickerStyle(.menu)
             }
             ToolbarItem(placement: .primaryAction) {
-                Button {
-                    showingAddRecipe = true
+                Menu {
+                    Button {
+                        showingAddRecipe = true
+                    } label: {
+                        Label("Nova Receita", systemImage: "square.and.pencil")
+                    }
+                    Button {
+                        jsonImportName = ""
+                        showingJSONImport = true
+                    } label: {
+                        Label("Importar JSON (IA)", systemImage: "sparkles")
+                    }
                 } label: {
                     Image(systemName: "plus")
                 }
@@ -92,9 +104,39 @@ struct RecipesListView: View {
         .sheet(isPresented: $showingAddRecipe) {
             RecipeEditorView()
         }
+        .sheet(isPresented: $showingJSONImport) {
+            JSONImportSheet(
+                title: "Importar Receita",
+                prompt: AIJSONImport.recipePrompt,
+                instructions: "Útil quando não sabes ao detalhe o valor nutricional de cada ingrediente. Os ingredientes novos são adicionados ao catálogo; um com o mesmo nome de um alimento já existente é reutilizado.",
+                additionalFields: {
+                    Section {
+                        TextField("Nome (opcional)", text: $jsonImportName)
+                    } header: {
+                        Text("Receita")
+                    } footer: {
+                        Text("Em branco, usa o nome que a IA der à receita.")
+                    }
+                },
+                isReadyToImport: { true }
+            ) { json in
+                try handleJSONImport(json)
+            }
+        }
         .sheet(item: $recipeToEdit) { recipe in
             RecipeEditorView(recipeToEdit: recipe)
         }
+    }
+
+    /// Creates the recipe straight from the AI's answer: its ingredients come from (or are added
+    /// to) the catalog, and the name typed in the sheet wins over the one the AI gave.
+    private func handleJSONImport(_ json: String) throws {
+        let payload = try AIJSONImport.decodeRecipe(from: json)
+        let typedName = jsonImportName.trimmingCharacters(in: .whitespaces)
+        let name = typedName.isEmpty ? (payload.name ?? "").trimmingCharacters(in: .whitespaces) : typedName
+        guard !name.isEmpty else { throw AIImportError.missingRecipeName }
+
+        store.addRecipe(Recipe(name: name, items: payload.items.map(store.recipeItem(for:))))
     }
 
     private func row(for recipe: Recipe) -> some View {

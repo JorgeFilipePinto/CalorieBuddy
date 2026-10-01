@@ -809,6 +809,136 @@ extension Array where Element == NutritionPlan {
     }
 }
 
+/// A body-composition value or body measurement entered in the app. Apple Health has no type for
+/// most of these (visceral fat, muscle mass, most circumferences), so they live in the app's own
+/// database; weight, body fat %, BMI and lean mass still come from Apple Health.
+enum BodyMetric: String, Codable, CaseIterable, Identifiable {
+    case bodyFat, muscleMass, leanMass, visceralFat
+    case neck, chest, arm, waist, hip, thigh, calf
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .bodyFat: return "Massa Gorda"
+        case .muscleMass: return "Massa Muscular"
+        case .leanMass: return "Massa Magra"
+        case .visceralFat: return "Gordura Visceral"
+        case .neck: return "Pescoço"
+        case .chest: return "Peito"
+        case .arm: return "Braço"
+        case .waist: return "Cintura"
+        case .hip: return "Anca"
+        case .thigh: return "Coxa"
+        case .calf: return "Gémeo"
+        }
+    }
+
+    /// "%", "kg", "" (visceral fat is a unitless level) or "cm".
+    var unitLabel: String {
+        switch self {
+        case .bodyFat: return "%"
+        case .muscleMass, .leanMass: return "kg"
+        case .visceralFat: return ""
+        default: return "cm"
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .bodyFat: return "percent"
+        case .muscleMass: return "figure.strengthtraining.traditional"
+        case .leanMass: return "figure.walk"
+        case .visceralFat: return "circle.dashed.inset.filled"
+        default: return "ruler"
+        }
+    }
+
+    var isCircumference: Bool {
+        switch self {
+        case .bodyFat, .muscleMass, .leanMass, .visceralFat: return false
+        default: return true
+        }
+    }
+
+    /// Kept in Apple Health rather than in the app's database — the types Health has. Writing them
+    /// there makes them visible to every other health app (and synced via the Health sync).
+    var isHealthKitWritable: Bool {
+        switch self {
+        case .bodyFat, .leanMass, .waist: return true
+        default: return false
+        }
+    }
+
+    /// Accepted values when entering one, to catch typos (e.g. 850 cm instead of 85,0).
+    var validRange: ClosedRange<Double> {
+        switch self {
+        case .bodyFat: return 2...70
+        case .muscleMass: return 5...150
+        case .leanMass: return 20...150
+        case .visceralFat: return 1...59
+        case .neck: return 20...70
+        case .chest: return 50...200
+        case .arm: return 15...70
+        case .waist: return 40...200
+        case .hip: return 50...200
+        case .thigh: return 25...100
+        case .calf: return 20...70
+        }
+    }
+
+    /// How to take the measurement, shown next to the figure in the guide.
+    var howToMeasure: String {
+        switch self {
+        case .bodyFat:
+            return "Lê o valor numa balança de bioimpedância ou numa avaliação (ex.: DEXA). Mede sempre nas mesmas condições: de manhã, em jejum, depois de ir à casa de banho."
+        case .muscleMass:
+            return "Só o músculo (sobretudo esquelético). Lê o valor de massa muscular da balança de bioimpedância ou da avaliação (DEXA), sempre da mesma fonte. Mede nas mesmas condições do peso: de manhã, em jejum."
+        case .leanMass:
+            return "Tudo o que não é gordura — músculo, ossos, órgãos e água —, ou seja peso − massa gorda. É sempre maior do que a massa muscular. Lê-o da balança ou da avaliação, nas mesmas condições do peso."
+        case .visceralFat:
+            return "Nível de gordura visceral (1–59) indicado pela balança de bioimpedância. Até 12 é considerado saudável na maioria das balanças."
+        case .neck:
+            return "Fita logo abaixo da maçã de Adão, ligeiramente inclinada para a frente e para baixo. Olha em frente, ombros relaxados."
+        case .chest:
+            return "Fita à volta da parte mais larga do peito, à altura dos mamilos, por baixo das axilas. Mede no fim de uma expiração normal."
+        case .arm:
+            return "Braço relaxado ao lado do corpo. Fita a meio caminho entre o ombro e o cotovelo (no ponto mais largo do bíceps)."
+        case .waist:
+            return "Fita a meio caminho entre a última costela e o topo da anca (normalmente à altura do umbigo), paralela ao chão. Mede no fim de uma expiração normal, sem encolher a barriga."
+        case .hip:
+            return "Pés juntos. Fita à volta da parte mais saliente dos glúteos, paralela ao chão."
+        case .thigh:
+            return "De pé, peso nas duas pernas. Fita à volta da parte mais larga da coxa, logo abaixo do glúteo."
+        case .calf:
+            return "De pé, peso nas duas pernas. Fita à volta da parte mais larga do gémeo."
+        }
+    }
+
+    /// Where the measuring tape goes on a standing figure, as fractions of its width/height:
+    /// `y` from the top, `x`/`width` from the left (`nil` for the non-tape metrics).
+    var tapePosition: (y: Double, x: Double, width: Double)? {
+        switch self {
+        case .neck: return (0.215, 0.41, 0.16)
+        case .chest: return (0.34, 0.28, 0.44)
+        case .arm: return (0.38, 0.07, 0.21)
+        case .waist: return (0.47, 0.30, 0.40)
+        case .hip: return (0.57, 0.28, 0.44)
+        case .thigh: return (0.70, 0.26, 0.23)
+        case .calf: return (0.85, 0.27, 0.21)
+        default: return nil
+        }
+    }
+}
+
+/// One value of a `BodyMetric` on a given date.
+struct BodyMeasurement: Identifiable, Codable, Equatable {
+    var id: UUID = UUID()
+    var metric: BodyMetric
+    var value: Double
+    var date: Date
+}
+
 /// The full contents of a CalorieBuddy database, as exported/imported via JSON.
 ///
 /// Uses a custom decoder so that databases exported before `foodItems`/`recipes`/`mealPlan`
@@ -829,6 +959,7 @@ struct AppDatabase: Codable {
     var stockLocations: [StockLocation]
     var mealPlan: MealPlan?
     var nutritionPlans: [NutritionPlan]
+    var bodyMeasurements: [BodyMeasurement]
 
     init(
         version: Int,
@@ -843,7 +974,8 @@ struct AppDatabase: Codable {
         supplementLogs: [SupplementLogEntry] = [],
         stockLocations: [StockLocation] = [],
         mealPlan: MealPlan? = nil,
-        nutritionPlans: [NutritionPlan] = []
+        nutritionPlans: [NutritionPlan] = [],
+        bodyMeasurements: [BodyMeasurement] = []
     ) {
         self.version = version
         self.exportedAt = exportedAt
@@ -858,11 +990,13 @@ struct AppDatabase: Codable {
         self.stockLocations = stockLocations
         self.mealPlan = mealPlan
         self.nutritionPlans = nutritionPlans
+        self.bodyMeasurements = bodyMeasurements
     }
 
     private enum CodingKeys: String, CodingKey {
         case version, exportedAt, settings, entries, foodItems, recipes, stores,
-             supplementCategories, supplements, supplementLogs, stockLocations, mealPlan, nutritionPlans
+             supplementCategories, supplements, supplementLogs, stockLocations, mealPlan, nutritionPlans,
+             bodyMeasurements
     }
 
     init(from decoder: Decoder) throws {
@@ -880,5 +1014,6 @@ struct AppDatabase: Codable {
         stockLocations = try container.decodeIfPresent([StockLocation].self, forKey: .stockLocations) ?? []
         mealPlan = try container.decodeIfPresent(MealPlan.self, forKey: .mealPlan)
         nutritionPlans = try container.decodeIfPresent([NutritionPlan].self, forKey: .nutritionPlans) ?? []
+        bodyMeasurements = try container.decodeIfPresent([BodyMeasurement].self, forKey: .bodyMeasurements) ?? []
     }
 }

@@ -108,8 +108,8 @@ struct RecipeEditorView: View {
             .sheet(isPresented: $showingJSONImport) {
                 JSONImportSheet(
                     title: "Importar Receita",
-                    exampleJSON: AIJSONImport.recipeExample,
-                    instructions: "Descreve a refeição a uma IA (ChatGPT ou semelhante) e pede-lhe este formato — útil quando não sabes ao detalhe o valor nutricional de cada componente. \"quantity\" é o número de doses de cada alimento. Um alimento com o mesmo nome de um já existente no catálogo é reutilizado em vez de criado outra vez."
+                    prompt: AIJSONImport.recipePrompt,
+                    instructions: "Útil quando não sabes ao detalhe o valor nutricional de cada ingrediente. Um ingrediente com o mesmo nome de um alimento já existente no catálogo é reutilizado em vez de criado outra vez."
                 ) { json in
                     try handleJSONImport(json)
                 }
@@ -134,23 +134,7 @@ struct RecipeEditorView: View {
         if name.trimmingCharacters(in: .whitespaces).isEmpty, let payloadName = payload.name {
             name = payloadName.trimmingCharacters(in: .whitespaces)
         }
-        for itemPayload in payload.items {
-            let food = resolvedFoodItem(for: itemPayload.food)
-            items.append(RecipeItem(foodItemID: food.id, quantity: itemPayload.quantity ?? 1))
-        }
-    }
-
-    /// Reuses an existing catalog food with the same name (case-insensitive) instead of creating
-    /// a duplicate every time the same ingredient shows up in another AI-generated recipe.
-    private func resolvedFoodItem(for payload: FoodImportPayload) -> FoodItem {
-        if let existing = store.foodItems.first(where: {
-            $0.name.localizedCaseInsensitiveCompare(payload.name) == .orderedSame
-        }) {
-            return existing
-        }
-        let newItem = payload.makeFoodItem()
-        store.addFoodItem(newItem)
-        return newItem
+        items.append(contentsOf: payload.items.map(store.recipeItem(for:)))
     }
 
     private func save() {

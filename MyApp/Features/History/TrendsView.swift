@@ -655,7 +655,7 @@ struct TrendsView: View {
         case .water:
             return "\(Int(value.rounded())) ml"
         case .coffee:
-            return "\(Int(value.rounded())) cafés"
+            return coffeesLabel(Int(value.rounded()))
         case .sleepHours:
             return value.formatted(.number.precision(.fractionLength(1))) + " h"
         case .bodyFatPercent:

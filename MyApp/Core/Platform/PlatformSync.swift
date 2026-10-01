@@ -165,7 +165,8 @@ final class PlatformSyncManager {
                 supplementLogs: try decode(AppCollection.supplementLogs, as: SupplementLogEntry.self),
                 stockLocations: try decode(AppCollection.stockLocations, as: StockLocation.self),
                 mealPlan: try decode(AppCollection.mealPlan, as: MealPlan.self).first,
-                nutritionPlans: plans
+                nutritionPlans: plans,
+                bodyMeasurements: try decode(AppCollection.bodyMeasurements, as: BodyMeasurement.self)
             )
             store.replaceDatabase(with: database)
 
@@ -546,6 +547,7 @@ private struct AppCollection {
     static let stockLocations = "stockLocations"
     static let mealPlan = "mealPlan"
     static let settings = "settings"
+    static let bodyMeasurements = "bodyMeasurements"
 
     let name: String
     let documents: [(id: String, value: any Encodable)]
@@ -570,6 +572,7 @@ private struct AppCollection {
             AppCollection(supplements, database.supplements),
             AppCollection(supplementLogs, database.supplementLogs),
             AppCollection(stockLocations, database.stockLocations),
+            AppCollection(bodyMeasurements, database.bodyMeasurements),
             AppCollection(name: mealPlan, documents: database.mealPlan.map { [("current", $0)] } ?? []),
             AppCollection(name: settings, documents: [("current", database.settings)])
         ]

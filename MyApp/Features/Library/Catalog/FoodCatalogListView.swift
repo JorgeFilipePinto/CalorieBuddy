@@ -6,6 +6,7 @@ struct FoodCatalogListView: View {
     @Environment(DataStore.self) private var store
 
     @State private var showingAddFoodItem = false
+    @State private var showingJSONImport = false
     @State private var foodItemToEdit: FoodItem?
     @State private var searchText = ""
     @State private var sortOrder: ItemSortOrder = .name
@@ -83,8 +84,17 @@ struct FoodCatalogListView: View {
                 .pickerStyle(.menu)
             }
             ToolbarItem(placement: .primaryAction) {
-                Button {
-                    showingAddFoodItem = true
+                Menu {
+                    Button {
+                        showingAddFoodItem = true
+                    } label: {
+                        Label("Novo Alimento", systemImage: "square.and.pencil")
+                    }
+                    Button {
+                        showingJSONImport = true
+                    } label: {
+                        Label("Importar JSON (IA)", systemImage: "sparkles")
+                    }
                 } label: {
                     Image(systemName: "plus")
                 }
@@ -92,6 +102,19 @@ struct FoodCatalogListView: View {
         }
         .sheet(isPresented: $showingAddFoodItem) {
             FoodItemEditorView()
+        }
+        .sheet(isPresented: $showingJSONImport) {
+            JSONImportSheet(
+                title: "Importar Alimentos",
+                prompt: AIJSONImport.foodPrompt,
+                instructions: "Útil quando não há rótulo à mão. Todos os alimentos da resposta são adicionados ao catálogo; um alimento com o mesmo nome de um já existente é mantido como está."
+            ) { json in
+                let payloads = try AIJSONImport.decodeFoodItems(from: json)
+                guard !payloads.isEmpty else { throw AIImportError.empty }
+                for payload in payloads {
+                    store.catalogFood(for: payload)
+                }
+            }
         }
         .sheet(item: $foodItemToEdit) { item in
             FoodItemEditorView(itemToEdit: item)

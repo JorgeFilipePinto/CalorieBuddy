@@ -6,6 +6,21 @@ struct DayView: View {
     @Environment(DataStore.self) private var store
     @Environment(HealthKitManager.self) private var healthKit
     let date: Date
+    /// Only on the "Hoje" tab: the day being shown, `nil` meaning today (so it keeps following
+    /// the calendar past midnight). When set, the title gets ‹ › arrows to step between days.
+    private let selectedDay: Binding<Date?>?
+
+    /// A fixed day, e.g. opened from the history list.
+    init(date: Date) {
+        self.date = date
+        self.selectedDay = nil
+    }
+
+    /// The "Hoje" tab: starts on today and can step back through previous days.
+    init(selectedDay: Binding<Date?>) {
+        self.date = selectedDay.wrappedValue ?? .now
+        self.selectedDay = selectedDay
+    }
 
     @State private var showingAddEntry = false
     @State private var showingScannerEntry = false
@@ -183,8 +198,19 @@ struct DayView: View {
             }
         }
         .navigationTitle(title)
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(selectedDay == nil ? .automatic : .inline)
+        #endif
         .trackScreen(isToday ? "Hoje" : "Dia")
+        .onChange(of: selectedDay?.wrappedValue) {
+            Task { await healthKit.refresh(days: daysNeededToCoverDate) }
+        }
         .toolbar {
+            if let selectedDay {
+                ToolbarItem(placement: .principal) {
+                    dayNavigator(selectedDay)
+                }
+            }
             ToolbarItem(placement: .primaryAction) {
                 Menu {
                     Button {
@@ -253,8 +279,8 @@ struct DayView: View {
         .sheet(isPresented: $showingJSONImport) {
             JSONImportSheet(
                 title: "Importar Registo",
-                exampleJSON: AIJSONImport.diaryExample,
-                instructions: "Descreve o que comeste a uma IA (ChatGPT ou semelhante) — ou envia-lhe uma foto do prato — e pede-lhe este formato para não teres de estimar os valores à mão. Podes colar um array de várias entradas ou só uma.",
+                prompt: AIJSONImport.diaryPrompt,
+                instructions: "Útil para refeições sem rótulo (comida caseira, restaurante) — a IA também aceita uma foto do prato. Cada alimento ou prato da resposta é registado nesta refeição.",
                 additionalFields: {
                     Section("Refeição") {
                         TextField("Nome (ex.: Almoço fora)", text: $jsonImportGroupName)
@@ -293,6 +319,61 @@ struct DayView: View {
 
     private var title: String {
         isToday ? "Hoje" : date.formatted(date: .abbreviated, time: .omitted)
+    }
+
+    /// "Hoje", "Ontem" or e.g. "segunda-feira, 28 set." — what the title arrows step through.
+    private var navigatorTitle: String {
+        if isToday { return "Hoje" }
+        if Calendar.current.isDateInYesterday(date) { return "Ontem" }
+        return date.formatted(.dateTime.weekday(.wide).day().month(.abbreviated))
+    }
+
+    /// ‹ day › in the navigation bar. There's no stepping into the future; tapping the day name
+    /// jumps back to today.
+    private func dayNavigator(_ selectedDay: Binding<Date?>) -> some View {
+        HStack(spacing: 20) {
+            Button {
+                step(selectedDay, by: -1)
+            } label: {
+                Image(systemName: "chevron.left")
+            }
+            .accessibilityLabel("Dia anterior")
+
+            Button {
+                guard !isToday else { return }
+                selectedDay.wrappedValue = nil
+                Haptics.selection()
+            } label: {
+                VStack(spacing: 0) {
+                    Text(navigatorTitle)
+                        .font(.headline)
+                        .foregroundStyle(.primary)
+                    if !isToday {
+                        Text("Toca para voltar a hoje")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .frame(minWidth: 150)
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                step(selectedDay, by: 1)
+            } label: {
+                Image(systemName: "chevron.right")
+            }
+            .disabled(isToday)
+            .accessibilityLabel("Dia seguinte")
+        }
+        .font(.headline)
+    }
+
+    private func step(_ selectedDay: Binding<Date?>, by days: Int) {
+        let calendar = Calendar.current
+        guard let target = calendar.date(byAdding: .day, value: days, to: calendar.startOfDay(for: date)) else { return }
+        selectedDay.wrappedValue = calendar.isDateInToday(target) || target > .now ? nil : target
+        Haptics.selection()
     }
 
     private func macroTile(title: String, value: Double, goal: Double?, color: Color) -> some View {
@@ -347,7 +428,7 @@ struct DayView: View {
     }
 
     private var coffeeRow: some View {
-        Label("\(healthKit.coffeeCount(on: date)) cafés", systemImage: "cup.and.saucer.fill")
+        Label(coffeesLabel(healthKit.coffeeCount(on: date)), systemImage: "cup.and.saucer.fill")
             .foregroundStyle(.brown)
             .font(.subheadline)
     }
@@ -392,7 +473,7 @@ struct DayView: View {
 
             Spacer()
 
-            Label("\(healthKit.coffeeCount(on: date)) cafés", systemImage: "cup.and.saucer.fill")
+            Label(coffeesLabel(healthKit.coffeeCount(on: date)), systemImage: "cup.and.saucer.fill")
                 .font(.subheadline)
 
             Spacer()

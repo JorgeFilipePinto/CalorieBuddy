@@ -15,9 +15,12 @@ import HealthKit
 final class HealthKitManager {
     /// One occasional measurement (weight, body fat %, BMI, ...) at a point in time.
     struct QuantitySample: Identifiable {
-        let id = UUID()
+        /// The HealthKit sample's own UUID, so a sample this app wrote can be found again to delete it.
+        var id = UUID()
         let date: Date
         let value: Double
+        /// Written by this app (and so deletable from it) rather than by a scale or another app.
+        var isFromThisApp = false
     }
 
     /// A coarse workout category, independent of HealthKit's much larger `HKWorkoutActivityType`
@@ -67,6 +70,8 @@ final class HealthKitManager {
         let startDate: Date
         let duration: TimeInterval
         let caloriesBurned: Double?
+        /// Distance covered (m), for the sports Health measures it for; `nil` otherwise.
+        var distanceMeters: Double? = nil
     }
 
     /// One workout as needed for personal records: its totals plus, for runs, rides and swims,
@@ -126,7 +131,7 @@ final class HealthKitManager {
 
     /// The `health_samples` types the sync owns: each window replaces all of them.
     static let syncedSampleTypes = [
-        "water", "active_energy", "basal_energy", "weight", "body_fat",
+        "water", "active_energy", "basal_energy", "weight", "body_fat", "lean_mass", "waist",
         "sleep_in_bed", "sleep_core", "sleep_deep", "sleep_rem", "sleep_awake"
     ]
 
@@ -169,6 +174,12 @@ final class HealthKitManager {
     private(set) var weightHistory: [QuantitySample] = []
     private(set) var bodyFatHistory: [QuantitySample] = []
     private(set) var bmiHistory: [QuantitySample] = []
+    /// Lean body mass (kg) — what smart scales write to Apple Health; muscle mass itself has no
+    /// Health type, so it's entered in the app (see `BodyMetric.muscleMass`).
+    private(set) var leanMassHistory: [QuantitySample] = []
+    private(set) var waistHistory: [QuantitySample] = []
+    /// Most recent height (m), to work out BMI when no app writes it to Health.
+    private(set) var latestHeightMeters: Double?
     private(set) var lastError: String?
 
     /// Caffeine in one "café" — a standard 50 ml Portuguese espresso — used to log and count
@@ -224,6 +235,9 @@ final class HealthKitManager {
     private let weightType = HKQuantityType.quantityType(forIdentifier: .bodyMass)!
     private let bodyFatType = HKQuantityType.quantityType(forIdentifier: .bodyFatPercentage)!
     private let bmiType = HKQuantityType.quantityType(forIdentifier: .bodyMassIndex)!
+    private let leanMassType = HKQuantityType.quantityType(forIdentifier: .leanBodyMass)!
+    private let waistType = HKQuantityType.quantityType(forIdentifier: .waistCircumference)!
+    private let heightType = HKQuantityType.quantityType(forIdentifier: .height)!
     private let waterType = HKQuantityType.quantityType(forIdentifier: .dietaryWater)!
     private let activeEnergyType = HKQuantityType.quantityType(forIdentifier: .activeEnergyBurned)!
     private let basalEnergyType = HKQuantityType.quantityType(forIdentifier: .basalEnergyBurned)!
@@ -262,9 +276,9 @@ final class HealthKitManager {
         guard isSupported else { return }
         do {
             try await store.requestAuthorization(
-                toShare: [weightType, waterType, caffeineType],
+                toShare: [weightType, waterType, caffeineType, bodyFatType, leanMassType, waistType],
                 read: [
-                    weightType, bodyFatType, bmiType, waterType, activeEnergyType, basalEnergyType, heartRateType,
+                    weightType, bodyFatType, bmiType, leanMassType, waistType, heightType, waterType, activeEnergyType, basalEnergyType, heartRateType,
                     caffeineType, sleepType, HKObjectType.workoutType(), runningDistanceType, cyclingDistanceType, swimmingDistanceType, rowingDistanceType
                 ]
             )
@@ -288,6 +302,9 @@ final class HealthKitManager {
         weightHistory = await fetchQuantityHistory(for: weightType, unit: .gramUnit(with: .kilo), limit: historyLimit)
         bodyFatHistory = await fetchQuantityHistory(for: bodyFatType, unit: .percent(), limit: historyLimit)
         bmiHistory = await fetchQuantityHistory(for: bmiType, unit: .count(), limit: historyLimit)
+        leanMassHistory = await fetchQuantityHistory(for: leanMassType, unit: .gramUnit(with: .kilo), limit: historyLimit)
+        waistHistory = await fetchQuantityHistory(for: waistType, unit: .meterUnit(with: .centi), limit: historyLimit)
+        latestHeightMeters = await fetchQuantityHistory(for: heightType, unit: .meter(), limit: 1).first?.value
         waterLitersByDay = await fetchDailyTotals(for: waterType, unit: .liter(), days: days)
         caloriesBurnedByDay = await fetchDailyTotals(for: activeEnergyType, unit: .kilocalorie(), days: days)
         caffeineMgByDay = await fetchDailyTotals(for: caffeineType, unit: .gramUnit(with: .milli), days: days)
@@ -351,6 +368,48 @@ final class HealthKitManager {
         }
     }
 
+    /// Writes a body-composition value to Apple Health, for the metrics Health has a type for
+    /// (`BodyMetric.healthKitWritable`). Returns `false` when it couldn't (unsupported metric, no
+    /// permission, …) so the caller can keep the value in the app's own database instead.
+    @discardableResult
+    func logBodyMetric(_ metric: BodyMetric, value: Double, date: Date) async -> Bool {
+        guard isSupported, let (type, unit, scale) = bodyMetricType(metric) else { return false }
+        let sample = HKQuantitySample(type: type, quantity: HKQuantity(unit: unit, doubleValue: value / scale), start: date, end: date)
+        do {
+            try await store.save(sample)
+            return true
+        } catch {
+            lastError = error.localizedDescription
+            return false
+        }
+    }
+
+    /// Deletes a body-composition sample this app wrote (Health refuses other apps' samples).
+    func deleteBodyMetricSample(_ metric: BodyMetric, id: UUID) async {
+        guard isSupported, let (type, _, _) = bodyMetricType(metric) else { return }
+        let descriptor = HKSampleQueryDescriptor(
+            predicates: [.quantitySample(type: type, predicate: HKQuery.predicateForObject(with: id))],
+            sortDescriptors: []
+        )
+        guard let sample = try? await descriptor.result(for: store).first else { return }
+        do {
+            try await store.delete(sample)
+            await refresh(days: 365)
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    /// Health type, unit and the factor from the app's value to Health's (body fat: % → fraction).
+    private func bodyMetricType(_ metric: BodyMetric) -> (HKQuantityType, HKUnit, Double)? {
+        switch metric {
+        case .bodyFat: return (bodyFatType, .percent(), 100)
+        case .leanMass: return (leanMassType, .gramUnit(with: .kilo), 1)
+        case .waist: return (waistType, .meterUnit(with: .centi), 1)
+        default: return nil
+        }
+    }
+
     func logWeight(kilograms: Double) async {
         guard isSupported, kilograms > 0 else { return }
         let sample = HKQuantitySample(
@@ -404,7 +463,12 @@ final class HealthKitManager {
         )
         guard let samples = try? await descriptor.result(for: store) else { return [] }
         return samples.map { sample in
-            QuantitySample(date: sample.startDate, value: sample.quantity.doubleValue(for: unit))
+            QuantitySample(
+                id: sample.uuid,
+                date: sample.startDate,
+                value: sample.quantity.doubleValue(for: unit),
+                isFromThisApp: sample.sourceRevision.source.bundleIdentifier == Bundle.main.bundleIdentifier
+            )
         }
     }
 
@@ -529,11 +593,16 @@ final class HealthKitManager {
         for workout in workouts {
             let day = calendar.startOfDay(for: workout.startDate)
             let calories = workout.statistics(for: activeEnergyType)?.sumQuantity()?.doubleValue(for: .kilocalorie())
+            let kind = Self.workoutKind(for: workout.workoutActivityType)
+            let distance = distanceType(for: kind)
+                .flatMap { workout.statistics(for: $0)?.sumQuantity()?.doubleValue(for: .meter()) }
+                .flatMap { $0 > 0 ? $0 : nil }
             let summary = WorkoutSummary(
-                kind: Self.workoutKind(for: workout.workoutActivityType),
+                kind: kind,
                 startDate: workout.startDate,
                 duration: workout.duration,
-                caloriesBurned: calories
+                caloriesBurned: calories,
+                distanceMeters: distance
             )
             byDay[day, default: []].append(summary)
         }
@@ -558,6 +627,8 @@ final class HealthKitManager {
         samples += try await hourlyBuckets(of: basalEnergyType, unit: .kilocalorie(), as: "basal_energy", platformUnit: "kcal", from: from, to: to)
         samples += try await quantitySamples(of: weightType, unit: .gramUnit(with: .kilo), scale: 1, as: "weight", platformUnit: "kg", from: from, to: to)
         samples += try await quantitySamples(of: bodyFatType, unit: .percent(), scale: 100, as: "body_fat", platformUnit: "%", from: from, to: to)
+        samples += try await quantitySamples(of: leanMassType, unit: .gramUnit(with: .kilo), scale: 1, as: "lean_mass", platformUnit: "kg", from: from, to: to)
+        samples += try await quantitySamples(of: waistType, unit: .meterUnit(with: .centi), scale: 1, as: "waist", platformUnit: "cm", from: from, to: to)
         samples += try await sleepSamples(from: from, to: to)
         return SyncPayload(samples: samples, workouts: try await syncWorkouts(from: from, to: to))
     }
@@ -685,6 +756,9 @@ final class HealthKitManager {
     func refresh(days: Int = 30) async {}
     func logWater(liters: Double) async {}
     func logWeight(kilograms: Double) async {}
+    @discardableResult
+    func logBodyMetric(_ metric: BodyMetric, value: Double, date: Date) async -> Bool { false }
+    func deleteBodyMetricSample(_ metric: BodyMetric, id: UUID) async {}
     func logCoffee() async {}
     func removeLastCoffee(on day: Date) async {}
     func loadRecordWorkouts() async {}

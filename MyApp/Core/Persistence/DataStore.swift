@@ -39,6 +39,7 @@ final class DataStore {
     private(set) var stockLocations: [StockLocation] = []
     private(set) var mealPlan: MealPlan?
     private(set) var nutritionPlans: [NutritionPlan] = []
+    private(set) var bodyMeasurements: [BodyMeasurement] = []
     var settings: UserSettings = .default
 
     private(set) var backupTimestamp: Date?
@@ -375,6 +376,23 @@ final class DataStore {
         }
     }
 
+    // MARK: - Body measurements
+
+    /// Every value of `metric`, most recent first.
+    func bodyMeasurements(of metric: BodyMetric) -> [BodyMeasurement] {
+        bodyMeasurements.filter { $0.metric == metric }.sorted { $0.date > $1.date }
+    }
+
+    func addBodyMeasurements(_ measurements: [BodyMeasurement]) {
+        bodyMeasurements.append(contentsOf: measurements)
+        persistActive()
+    }
+
+    func deleteBodyMeasurement(_ measurement: BodyMeasurement) {
+        bodyMeasurements.removeAll { $0.id == measurement.id }
+        persistActive()
+    }
+
     func addSupplementCategory(_ category: SupplementCategory) {
         supplementCategories.append(category)
         persistActive()
@@ -383,6 +401,33 @@ final class DataStore {
     func addSupplement(_ supplement: Supplement) {
         supplements.append(supplement)
         persistActive()
+    }
+
+    /// The category named `name` (case-insensitive), created if it doesn't exist yet — so an
+    /// AI-imported supplement lands in the user's own category rather than a duplicate of it.
+    /// An empty name falls back to "Outros".
+    func supplementCategory(named name: String?) -> SupplementCategory {
+        let trimmed = (name ?? "").trimmingCharacters(in: .whitespaces)
+        let wanted = trimmed.isEmpty ? "Outros" : trimmed
+        if let existing = supplementCategories.first(where: { $0.name.matchesImportedName(wanted) }) {
+            return existing
+        }
+        let category = SupplementCategory(name: wanted)
+        addSupplementCategory(category)
+        return category
+    }
+
+    /// The supplement an AI-imported one stands for: an existing one with the same name
+    /// (case-insensitive), kept as it is, or else a new one added in its category.
+    @discardableResult
+    func catalogSupplement(for payload: SupplementImportPayload) -> Supplement {
+        let name = payload.name.trimmingCharacters(in: .whitespaces)
+        if let existing = supplements.first(where: { $0.name.matchesImportedName(name) }) {
+            return existing
+        }
+        let supplement = payload.makeSupplement(categoryID: supplementCategory(named: payload.category).id)
+        addSupplement(supplement)
+        return supplement
     }
 
     func updateSupplement(_ supplement: Supplement) {
@@ -541,6 +586,41 @@ final class DataStore {
     func addFoodItem(_ item: FoodItem) {
         foodItems.append(item)
         persistActive()
+    }
+
+    /// The catalog food an AI-imported food stands for: an existing one with the same name
+    /// (case-insensitive), so the same ingredient showing up in several imports isn't duplicated,
+    /// or else a new one, added to the catalog.
+    @discardableResult
+    func catalogFood(for payload: FoodImportPayload) -> FoodItem {
+        if let existing = existingCatalogFood(named: payload.name) {
+            return existing
+        }
+        let newItem = payload.makeFoodItem()
+        addFoodItem(newItem)
+        return newItem
+    }
+
+    /// One ingredient of an AI-imported recipe, backed by `catalogFood(for:)`. The AI counts the
+    /// quantity in doses of *its* `doseSize`; when an existing catalog food with a different dose
+    /// is reused (e.g. 1.5 × 100 g of rice vs. the catalog's 150 g dose), the quantity is
+    /// converted so the amount stays the same — whenever both share a base unit (g, ml or units).
+    func recipeItem(for payload: RecipeItemImportPayload) -> RecipeItem {
+        let quantity = payload.quantity ?? 1
+        guard let existing = existingCatalogFood(named: payload.food.name) else {
+            return RecipeItem(foodItemID: catalogFood(for: payload.food).id, quantity: quantity)
+        }
+        let imported = payload.food.makeFoodItem()
+        guard existing.unit.baseUnit == imported.unit.baseUnit, existing.baseDoseAmount > 0 else {
+            return RecipeItem(foodItemID: existing.id, quantity: quantity)
+        }
+        let converted = quantity * imported.baseDoseAmount / existing.baseDoseAmount
+        return RecipeItem(foodItemID: existing.id, quantity: (converted * 100).rounded() / 100)
+    }
+
+    private func existingCatalogFood(named name: String) -> FoodItem? {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        return foodItems.first { $0.name.matchesImportedName(trimmed) }
     }
 
     func updateFoodItem(_ item: FoodItem) {
@@ -742,6 +822,7 @@ final class DataStore {
         stockLocations = database.stockLocations
         mealPlan = database.mealPlan
         nutritionPlans = database.nutritionPlans
+        bodyMeasurements = database.bodyMeasurements
     }
 
     /// Re-reads the active database file from disk and updates in-memory state to match it.
@@ -768,7 +849,8 @@ final class DataStore {
             supplementLogs: supplementLogs,
             stockLocations: stockLocations,
             mealPlan: mealPlan,
-            nutritionPlans: nutritionPlans
+            nutritionPlans: nutritionPlans,
+            bodyMeasurements: bodyMeasurements
         )
     }
 
@@ -888,6 +970,7 @@ final class DataStore {
         stockLocations = database.stockLocations
         mealPlan = database.mealPlan
         nutritionPlans = database.nutritionPlans
+        bodyMeasurements = database.bodyMeasurements
         persistActive()
         refreshBackupTimestamp()
     }
@@ -926,6 +1009,7 @@ final class DataStore {
         stockLocations = restoredDatabase.stockLocations
         mealPlan = restoredDatabase.mealPlan
         nutritionPlans = restoredDatabase.nutritionPlans
+        bodyMeasurements = restoredDatabase.bodyMeasurements
         persistActive()
         refreshBackupTimestamp()
     }
@@ -945,9 +1029,18 @@ final class DataStore {
         stockLocations = []
         mealPlan = nil
         nutritionPlans = []
+        bodyMeasurements = []
         settings = .default
         try? fileManager.removeItem(at: backupURL)
         backupTimestamp = nil
         persistActive()
+    }
+}
+
+private extension String {
+    /// Whether this catalog name and one written by an AI are the same thing — ignoring case and
+    /// accents, since an AI may well write "Gel Energetico" for the user's "Gel Energético".
+    func matchesImportedName(_ other: String) -> Bool {
+        compare(other, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
     }
 }

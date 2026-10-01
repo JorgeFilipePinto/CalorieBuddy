@@ -6,6 +6,7 @@ struct SupplementsListView: View {
     @Environment(DataStore.self) private var store
 
     @State private var showingAddSupplement = false
+    @State private var showingJSONImport = false
     @State private var supplementToEdit: Supplement?
     @State private var searchText = ""
     @State private var sortOrder: ItemSortOrder = .dateAdded
@@ -67,8 +68,17 @@ struct SupplementsListView: View {
                 .pickerStyle(.menu)
             }
             ToolbarItem(placement: .primaryAction) {
-                Button {
-                    showingAddSupplement = true
+                Menu {
+                    Button {
+                        showingAddSupplement = true
+                    } label: {
+                        Label("Novo Suplemento", systemImage: "square.and.pencil")
+                    }
+                    Button {
+                        showingJSONImport = true
+                    } label: {
+                        Label("Importar JSON (IA)", systemImage: "sparkles")
+                    }
                 } label: {
                     Image(systemName: "plus")
                 }
@@ -76,6 +86,19 @@ struct SupplementsListView: View {
         }
         .sheet(isPresented: $showingAddSupplement) {
             SupplementEditorView()
+        }
+        .sheet(isPresented: $showingJSONImport) {
+            JSONImportSheet(
+                title: "Importar Suplementos",
+                prompt: AIJSONImport.supplementPrompt(categories: store.supplementCategories.map(\.name)),
+                instructions: "Útil para preencher a embalagem, a dose e os macros a partir do rótulo. Todos os suplementos da resposta são adicionados; um com o mesmo nome de um já existente é mantido como está. Preços e stocks acrescentam-se depois, no editor."
+            ) { json in
+                let payloads = try AIJSONImport.decodeSupplements(from: json)
+                guard !payloads.isEmpty else { throw AIImportError.empty }
+                for payload in payloads {
+                    store.catalogSupplement(for: payload)
+                }
+            }
         }
         .sheet(item: $supplementToEdit) { supplement in
             SupplementEditorView(supplementToEdit: supplement)
