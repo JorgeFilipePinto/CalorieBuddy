@@ -25,7 +25,7 @@ struct PlatformSyncView: View {
                     ContentUnavailableView(
                         "Plataforma não configurada",
                         systemImage: "icloud.slash",
-                        description: Text("Adiciona o ficheiro Supabase-Debug.plist (ou Supabase-Release.plist) com o URL e a publishable key da plataforma à pasta MyApp e volta a compilar a app. Modelo em Config/Supabase.example.plist.")
+                        description: Text("Adiciona o ficheiro Supabase-Debug.plist (ou Supabase-Release.plist) com o URL e a publishable key da plataforma à pasta MyApp/Resources/Config e volta a compilar a app. Modelo em Config/Supabase.example.plist.")
                     )
                 }
             } else if let session = client.session {
