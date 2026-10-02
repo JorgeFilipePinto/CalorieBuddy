@@ -29,6 +29,13 @@ struct SupplementPickerView: View {
     var body: some View {
         NavigationStack {
             Form {
+                UsageSuggestionsSection(
+                    suggestions: { store.suggestedSupplements($0) },
+                    title: { $0.name },
+                    subtitle: { "dose \($0.doseLabel)" },
+                    isSelected: { $0.id == selectedSupplementID },
+                    select: { selectedSupplementID = $0.id }
+                )
                 Section("Suplemento") {
                     if store.supplements.isEmpty {
                         ContentUnavailableView(

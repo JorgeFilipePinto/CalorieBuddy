@@ -254,6 +254,13 @@ extension Array where Element: Favoritable {
 /// Uses a custom decoder so that catalog items saved before `unit`/`doseSize`/`nutritionBasis`/
 /// `minerals`/`vitamins`/`isFavorite`/`createdAt` existed still import cleanly, with sensible
 /// defaults.
+/// A user-editable group for catalog foods (e.g. "Proteína", "Hidratos de carbono", "Gordura
+/// saturada"), so the catalog can be browsed by what each food is for.
+struct FoodCategory: Identifiable, Codable, Hashable {
+    var id: UUID = UUID()
+    var name: String
+}
+
 struct FoodItem: Identifiable, Codable, Hashable, Doseable, Favoritable {
     var id: UUID
     var name: String
@@ -280,6 +287,8 @@ struct FoodItem: Identifiable, Codable, Hashable, Doseable, Favoritable {
     var createdAt: Date
     /// The item's photo in `PhotoStore` (`nil` = none).
     var photoID: UUID?
+    /// Its `FoodCategory` (`nil` = uncategorised).
+    var categoryID: UUID?
 
     init(
         id: UUID = UUID(),
@@ -298,7 +307,8 @@ struct FoodItem: Identifiable, Codable, Hashable, Doseable, Favoritable {
         prices: [PriceEntry] = [],
         isFavorite: Bool = false,
         createdAt: Date = Date(),
-        photoID: UUID? = nil
+        photoID: UUID? = nil,
+        categoryID: UUID? = nil
     ) {
         self.id = id
         self.name = name
@@ -317,11 +327,12 @@ struct FoodItem: Identifiable, Codable, Hashable, Doseable, Favoritable {
         self.isFavorite = isFavorite
         self.createdAt = createdAt
         self.photoID = photoID
+        self.categoryID = categoryID
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, name, brand, unit, doseSize, nutritionBasis, calories, protein, carbs, fat,
-             minerals, vitamins, barcodes, prices, isFavorite, createdAt, photoID
+             minerals, vitamins, barcodes, prices, isFavorite, createdAt, photoID, categoryID
     }
 
     /// Only for reading the old singular `barcode` field from databases saved before this was
@@ -357,6 +368,7 @@ struct FoodItem: Identifiable, Codable, Hashable, Doseable, Favoritable {
         isFavorite = try container.decodeIfPresent(Bool.self, forKey: .isFavorite) ?? false
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? .distantPast
         photoID = try container.decodeIfPresent(UUID.self, forKey: .photoID)
+        categoryID = try container.decodeIfPresent(UUID.self, forKey: .categoryID)
     }
 
     /// Multiplier turning the stored nutrition values into "nutrition for one dose".
@@ -1104,6 +1116,7 @@ struct AppDatabase: Codable {
     var settings: UserSettings
     var entries: [FoodEntry]
     var foodItems: [FoodItem]
+    var foodCategories: [FoodCategory]
     var recipes: [Recipe]
     var stores: [Store]
     var supplementCategories: [SupplementCategory]
@@ -1130,13 +1143,15 @@ struct AppDatabase: Codable {
         mealPlans: [MealPlan] = [],
         nutritionPlans: [NutritionPlan] = [],
         bodyMeasurements: [BodyMeasurement] = [],
-        progressPhotos: [ProgressPhoto] = []
+        progressPhotos: [ProgressPhoto] = [],
+        foodCategories: [FoodCategory] = []
     ) {
         self.version = version
         self.exportedAt = exportedAt
         self.settings = settings
         self.entries = entries
         self.foodItems = foodItems
+        self.foodCategories = foodCategories
         self.recipes = recipes
         self.stores = stores
         self.supplementCategories = supplementCategories
@@ -1152,7 +1167,7 @@ struct AppDatabase: Codable {
     private enum CodingKeys: String, CodingKey {
         case version, exportedAt, settings, entries, foodItems, recipes, stores,
              supplementCategories, supplements, supplementLogs, stockLocations, mealPlans, nutritionPlans,
-             bodyMeasurements, progressPhotos
+             bodyMeasurements, progressPhotos, foodCategories
     }
 
     /// Databases written before several meal plans existed had at most one, under `mealPlan`.
@@ -1167,6 +1182,7 @@ struct AppDatabase: Codable {
         settings = try container.decode(UserSettings.self, forKey: .settings)
         entries = try container.decode([FoodEntry].self, forKey: .entries)
         foodItems = try container.decodeIfPresent([FoodItem].self, forKey: .foodItems) ?? []
+        foodCategories = try container.decodeIfPresent([FoodCategory].self, forKey: .foodCategories) ?? []
         recipes = try container.decodeIfPresent([Recipe].self, forKey: .recipes) ?? []
         stores = try container.decodeIfPresent([Store].self, forKey: .stores) ?? []
         supplementCategories = try container.decodeIfPresent([SupplementCategory].self, forKey: .supplementCategories) ?? []

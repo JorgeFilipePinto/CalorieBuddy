@@ -18,6 +18,13 @@ struct RecipePickerView: View {
     var body: some View {
         NavigationStack {
             Form {
+                UsageSuggestionsSection(
+                    suggestions: { store.suggestedRecipes($0) },
+                    title: { $0.name },
+                    subtitle: { "\($0.items.count) alimentos · \(store.totalCalories(for: $0)) kcal" },
+                    isSelected: { $0.id == selectedRecipe?.id },
+                    select: { selectedRecipe = $0 }
+                )
                 Section("Receita") {
                     if store.recipes.isEmpty {
                         ContentUnavailableView(

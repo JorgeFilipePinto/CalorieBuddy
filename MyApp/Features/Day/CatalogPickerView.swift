@@ -28,6 +28,13 @@ struct CatalogPickerView: View {
     var body: some View {
         NavigationStack {
             Form {
+                UsageSuggestionsSection(
+                    suggestions: { store.suggestedFoodItems($0) },
+                    title: { item in item.brand.map { "\(item.name) (\($0))" } ?? item.name },
+                    subtitle: { "dose \($0.doseLabel) · \($0.scaledCalories(quantity: 1)) kcal" },
+                    isSelected: { $0.id == selectedItem?.id },
+                    select: { selectedItem = $0 }
+                )
                 Section("Alimento") {
                     if store.foodItems.isEmpty {
                         ContentUnavailableView(

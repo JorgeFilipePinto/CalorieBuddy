@@ -10,6 +10,8 @@ struct FoodCatalogListView: View {
     @State private var foodItemToEdit: FoodItem?
     @State private var searchText = ""
     @State private var sortOrder: ItemSortOrder = .name
+    @State private var showingCategories = false
+    @AppStorage("CalorieBuddy.catalogGroupedByCategory") private var groupedByCategory = true
 
     private var currencyCode: String { Locale.current.currency?.identifier ?? "EUR" }
 
@@ -21,10 +23,24 @@ struct FoodCatalogListView: View {
     private var others: [FoodItem] { visibleItems.filter { !$0.isFavorite } }
     private var alphabeticalGroups: [(letter: String, items: [FoodItem])] { others.groupedAlphabetically }
 
+    /// One section per category (in the categories' order), then the uncategorised foods.
+    private var categoryGroups: [(id: String, title: String, items: [FoodItem])] {
+        var groups: [(id: String, title: String, items: [FoodItem])] = store.foodCategories.compactMap { category in
+            let items = others.filter { $0.categoryID == category.id }
+            return items.isEmpty ? nil : (category.id.uuidString, category.name, items)
+        }
+        let known = Set(store.foodCategories.map(\.id))
+        let rest = others.filter { $0.categoryID.map { !known.contains($0) } ?? true }
+        if !rest.isEmpty { groups.append(("none", "Sem categoria", rest)) }
+        return groups
+    }
+
+    private var showsAlphabetIndex: Bool { !groupedByCategory && sortOrder == .name && !alphabeticalGroups.isEmpty }
+
     var body: some View {
         ScrollViewReader { proxy in
             HStack(spacing: 0) {
-                if sortOrder == .name, !alphabeticalGroups.isEmpty {
+                if showsAlphabetIndex {
                     AlphabetIndexScrollBar(availableLetters: Set(alphabeticalGroups.map(\.letter))) { letter in
                         withAnimation { proxy.scrollTo(letter, anchor: .top) }
                     }
@@ -47,6 +63,14 @@ struct FoodCatalogListView: View {
                         if others.isEmpty && favorites.isEmpty {
                             Text("Sem resultados para \"\(searchText)\".")
                                 .foregroundStyle(.secondary)
+                        } else if groupedByCategory {
+                            ForEach(categoryGroups, id: \.id) { group in
+                                Section("\(group.title) (\(group.items.count))") {
+                                    ForEach(group.items) { item in
+                                        row(for: item)
+                                    }
+                                }
+                            }
                         } else if sortOrder == .name {
                             ForEach(alphabeticalGroups, id: \.letter) { group in
                                 Section(group.letter) {
@@ -90,6 +114,14 @@ struct FoodCatalogListView: View {
                     } label: {
                         Label("Novo Alimento", systemImage: "square.and.pencil")
                     }
+                    Toggle(isOn: $groupedByCategory) {
+                        Label("Agrupar por Categoria", systemImage: "square.grid.2x2")
+                    }
+                    Button {
+                        showingCategories = true
+                    } label: {
+                        Label("Gerir Categorias", systemImage: "tag")
+                    }
                     Button {
                         showingJSONImport = true
                     } label: {
@@ -115,6 +147,9 @@ struct FoodCatalogListView: View {
                     store.catalogFood(for: payload)
                 }
             }
+        }
+        .sheet(isPresented: $showingCategories) {
+            NavigationStack { FoodCategoriesView() }
         }
         .sheet(item: $foodItemToEdit) { item in
             FoodItemEditorView(itemToEdit: item)

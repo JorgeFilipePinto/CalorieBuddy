@@ -24,10 +24,18 @@ struct MyApp: App {
         WindowGroup {
             ZStack {
                 if entryPhase == .main {
-                    ContentView()
-                        .environment(store)
-                        .environment(healthKit)
-                        .environment(platformSync)
+                    Group {
+                        // With a platform configured, the app needs the athlete's session: the
+                        // data lives there (the dashboard depends on it) and comes down at sign-in.
+                        if platformSync.isAvailable && (!platformSync.client.isSignedIn || platformSync.isLoadingAccount) {
+                            LoginView()
+                        } else {
+                            ContentView()
+                        }
+                    }
+                    .environment(store)
+                    .environment(healthKit)
+                    .environment(platformSync)
                 }
 
                 switch entryPhase {

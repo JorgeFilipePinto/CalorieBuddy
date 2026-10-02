@@ -21,6 +21,7 @@ struct FoodItemEditorView: View {
     @State private var name = ""
     @State private var photoID: UUID?
     @State private var brand = ""
+    @State private var categoryID: UUID?
     @State private var unit: MeasurementUnit = .gram
     @State private var doseSizeText = "100"
     @State private var nutritionBasis: NutritionBasis = .per100
@@ -77,6 +78,12 @@ struct FoodItemEditorView: View {
                 Section("Alimento") {
                     TextField("Nome", text: $name)
                     TextField("Marca (opcional)", text: $brand)
+                    Picker("Categoria", selection: $categoryID) {
+                        Text("Sem categoria").tag(UUID?.none)
+                        ForEach(store.foodCategories) { category in
+                            Text(category.name).tag(UUID?.some(category.id))
+                        }
+                    }
                     Picker("Unidade", selection: $unit) {
                         ForEach(MeasurementUnit.allCases) { measurementUnit in
                             Text(measurementUnit.shortLabel).tag(measurementUnit)
@@ -310,6 +317,7 @@ struct FoodItemEditorView: View {
         name = item.name
         photoID = item.photoID
         brand = item.brand ?? ""
+        categoryID = item.categoryID
         unit = item.unit
         doseSizeText = formatted(item.doseSize)
         nutritionBasis = item.nutritionBasis
@@ -349,7 +357,8 @@ struct FoodItemEditorView: View {
             prices: prices,
             isFavorite: itemToEdit?.isFavorite ?? false,
             createdAt: itemToEdit?.createdAt ?? Date(),
-            photoID: photoID
+            photoID: photoID,
+            categoryID: categoryID
         )
         if itemToEdit == nil {
             store.addFoodItem(item)

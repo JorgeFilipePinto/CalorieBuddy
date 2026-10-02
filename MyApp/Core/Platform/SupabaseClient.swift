@@ -251,6 +251,26 @@ final class SupabaseClient {
         try await send(method, "/functions/v1/\(name)", body: object.map { try JSONSerialization.data(withJSONObject: $0) })
     }
 
+    // MARK: Storage
+
+    /// Uploads a file to a (private) bucket, replacing whatever was at `path`.
+    func uploadObject(_ bucket: String, path: String, data: Data, contentType: String) async throws {
+        _ = try await send("POST", "/storage/v1/object/\(bucket)/\(path)", body: data,
+                           headers: ["Content-Type": contentType, "x-upsert": "true"])
+    }
+
+    /// Downloads a file the signed-in user may read.
+    func downloadObject(_ bucket: String, path: String) async throws -> Data {
+        try await send("GET", "/storage/v1/object/authenticated/\(bucket)/\(path)", headers: ["Accept": "*/*"])
+    }
+
+    /// Deletes files from a bucket (paths that don't exist are ignored).
+    func deleteObjects(_ bucket: String, paths: [String]) async throws {
+        guard !paths.isEmpty else { return }
+        _ = try await send("DELETE", "/storage/v1/object/\(bucket)",
+                           body: JSONSerialization.data(withJSONObject: ["prefixes": paths]))
+    }
+
     // MARK: Transport
 
     private func send(

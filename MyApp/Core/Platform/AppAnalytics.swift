@@ -22,6 +22,10 @@ enum AppEvent {
     case screenViewed(String)
     case platformSync(automatic: Bool, succeeded: Bool)
     case platformRestore(succeeded: Bool)
+    /// Signed in on the login screen (the account's data was downloaded).
+    case platformSignIn
+    /// Signed out (synced, then erased this iPhone's data).
+    case platformSignOut
     /// "invite", "update" or "revoke" — never who or what.
     case dashboardAccessChanged(action: String)
 
@@ -38,6 +42,8 @@ enum AppEvent {
         case .screenViewed: return "screen_view"
         case .platformSync: return "platform_sync"
         case .platformRestore: return "platform_restore"
+        case .platformSignIn: return "platform_sign_in"
+        case .platformSignOut: return "platform_sign_out"
         case .dashboardAccessChanged: return "dashboard_access_changed"
         }
     }
@@ -60,7 +66,8 @@ enum AppEvent {
             return ["succeeded": succeeded]
         case .dashboardAccessChanged(let action):
             return ["action": action]
-        case .mealPlanImported, .mealPlanExported, .databaseImported, .databaseExported, .personalRecordsViewed:
+        case .mealPlanImported, .mealPlanExported, .databaseImported, .databaseExported, .personalRecordsViewed,
+             .platformSignIn, .platformSignOut:
             return [:]
         }
     }

@@ -28,6 +28,7 @@ enum DataStoreError: LocalizedError {
 final class DataStore {
     private(set) var entries: [FoodEntry] = []
     private(set) var foodItems: [FoodItem] = []
+    private(set) var foodCategories: [FoodCategory] = []
     private(set) var recipes: [Recipe] = []
     private(set) var stores: [Store] = []
     private(set) var supplementCategories: [SupplementCategory] = []
@@ -106,12 +107,48 @@ final class DataStore {
     private static let hasSeededTestSupplementsKey = "CalorieBuddy.hasSeededTestSupplementsV2"
     private static let hasSeededMealPlanKey = "CalorieBuddy.hasSeededMealPlanJune26"
     private static let hasSeededNutritionPlanKey = "CalorieBuddy.hasSeededNutritionPlan"
+    private static let hasSeededFoodCategoriesKey = "CalorieBuddy.hasSeededFoodCategories"
 
     private func seedExampleDataIfNeeded() {
-        seedFoodGuideIfNeeded()
-        seedTestSupplementsIfNeeded()
-        seedMealPlanIfNeeded()
+        // With a platform configured, the data comes from it at sign-in: example foods, supplements
+        // and the June meal plan would only end up duplicated there.
+        if SupabaseConfig.current == nil {
+            seedFoodGuideIfNeeded()
+            seedTestSupplementsIfNeeded()
+            seedMealPlanIfNeeded()
+        }
         seedNutritionPlanIfNeeded()
+        seedFoodCategoriesIfNeeded()
+    }
+
+    /// Default food categories (all editable), and a first sort of the existing catalog: each
+    /// uncategorised food goes to the category of its dominant macro (protein, carbs or fat).
+    /// Runs once; foods it can't place stay uncategorised.
+    private func seedFoodCategoriesIfNeeded() {
+        guard !UserDefaults.standard.bool(forKey: Self.hasSeededFoodCategoriesKey) else { return }
+        UserDefaults.standard.set(true, forKey: Self.hasSeededFoodCategoriesKey)
+        guard foodCategories.isEmpty else { return }
+
+        let protein = FoodCategory(name: "Proteína")
+        let carbs = FoodCategory(name: "Hidratos de carbono")
+        let fat = FoodCategory(name: "Gordura")
+        foodCategories = [
+            protein, carbs, fat,
+            FoodCategory(name: "Gordura saturada"),
+            FoodCategory(name: "Fruta"),
+            FoodCategory(name: "Vegetais"),
+            FoodCategory(name: "Laticínios"),
+            FoodCategory(name: "Outros")
+        ]
+        for index in foodItems.indices where foodItems[index].categoryID == nil {
+            switch foodItems[index].dominantMacro {
+            case .protein: foodItems[index].categoryID = protein.id
+            case .carbs: foodItems[index].categoryID = carbs.id
+            case .fat: foodItems[index].categoryID = fat.id
+            case .calories: break
+            }
+        }
+        persistActive()
     }
 
     /// Seeds one initial nutrition plan carrying over whatever daily goals were already set (the
@@ -675,6 +712,33 @@ final class DataStore {
         persistActive()
     }
 
+    // MARK: - Food categories
+
+    func foodCategory(withID id: UUID?) -> FoodCategory? {
+        guard let id else { return nil }
+        return foodCategories.first { $0.id == id }
+    }
+
+    func addFoodCategory(_ category: FoodCategory) {
+        foodCategories.append(category)
+        persistActive()
+    }
+
+    func renameFoodCategory(_ category: FoodCategory, to name: String) {
+        guard let index = foodCategories.firstIndex(where: { $0.id == category.id }) else { return }
+        foodCategories[index].name = name
+        persistActive()
+    }
+
+    /// Removes a category; its foods stay in the catalog, uncategorised.
+    func deleteFoodCategory(_ category: FoodCategory) {
+        foodCategories.removeAll { $0.id == category.id }
+        for index in foodItems.indices where foodItems[index].categoryID == category.id {
+            foodItems[index].categoryID = nil
+        }
+        persistActive()
+    }
+
     func toggleFavorite(_ item: FoodItem) {
         guard let index = foodItems.firstIndex(where: { $0.id == item.id }) else { return }
         foodItems[index].isFavorite.toggle()
@@ -866,6 +930,7 @@ final class DataStore {
         entries = database.entries
         settings = database.settings
         foodItems = database.foodItems
+        foodCategories = database.foodCategories
         recipes = database.recipes
         stores = database.stores
         supplementCategories = database.supplementCategories
@@ -904,7 +969,8 @@ final class DataStore {
             mealPlans: mealPlans,
             nutritionPlans: nutritionPlans,
             bodyMeasurements: bodyMeasurements,
-            progressPhotos: progressPhotos
+            progressPhotos: progressPhotos,
+            foodCategories: foodCategories
         )
     }
 
@@ -987,6 +1053,25 @@ final class DataStore {
         adoptAsActive(database)
     }
 
+    /// Takes in records changed elsewhere (the dashboard), already merged into `database` by the
+    /// platform sync. Unlike `replaceDatabase`, this is an ordinary edit: the backup isn't touched.
+    func applyRemoteChanges(_ database: AppDatabase) {
+        entries = database.entries
+        settings = database.settings
+        foodItems = database.foodItems
+        foodCategories = database.foodCategories
+        recipes = database.recipes
+        stores = database.stores
+        supplementCategories = database.supplementCategories
+        supplements = database.supplements
+        supplementLogs = database.supplementLogs
+        stockLocations = database.stockLocations
+        mealPlans = database.mealPlans
+        bodyMeasurements = database.bodyMeasurements
+        progressPhotos = database.progressPhotos
+        persistActive()
+    }
+
     // MARK: - Import (upload) / Restore
 
     /// Overwrites the active database with the contents of `url`. The database that was active
@@ -1016,6 +1101,7 @@ final class DataStore {
         entries = database.entries
         settings = database.settings
         foodItems = database.foodItems
+        foodCategories = database.foodCategories
         recipes = database.recipes
         stores = database.stores
         supplementCategories = database.supplementCategories
@@ -1056,6 +1142,7 @@ final class DataStore {
         entries = restoredDatabase.entries
         settings = restoredDatabase.settings
         foodItems = restoredDatabase.foodItems
+        foodCategories = restoredDatabase.foodCategories
         recipes = restoredDatabase.recipes
         stores = restoredDatabase.stores
         supplementCategories = restoredDatabase.supplementCategories
@@ -1072,11 +1159,19 @@ final class DataStore {
 
     // MARK: - Delete everything
 
+    /// Whether this iPhone holds records of its own (not just settings, categories or the
+    /// initial nutrition plan) — signing in sends them to the platform before downloading.
+    var hasUserData: Bool {
+        !entries.isEmpty || !foodItems.isEmpty || !recipes.isEmpty || !supplements.isEmpty
+            || !supplementLogs.isEmpty || !mealPlans.isEmpty || !bodyMeasurements.isEmpty || !progressPhotos.isEmpty
+    }
+
     /// Wipes every piece of data this app stores locally — entries, catalog, recipes, meal plan,
     /// stores, supplements and settings — including the on-disk backup. Does not touch Apple Health.
     func deleteEverything() {
         entries = []
         foodItems = []
+        foodCategories = []
         recipes = []
         stores = []
         supplementCategories = []
