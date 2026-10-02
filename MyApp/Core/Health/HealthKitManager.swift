@@ -1,0 +1,767 @@
+import CryptoKit
+import Foundation
+import Observation
+#if canImport(HealthKit) && os(iOS)
+import HealthKit
+#endif
+
+/// Bridges to Apple Health so weight, body composition, sleep, water, workouts and active
+/// calories burned use data that other apps (a smart scale, a sleep tracker, the Watch, the
+/// Health app itself) already write, instead of a second local diary.
+///
+/// HealthKit only exists on iOS/iPadOS, so every real implementation below is compiled out
+/// on other platforms (e.g. this project's macOS target), falling back to inert no-ops.
+@Observable
+final class HealthKitManager {
+    /// One occasional measurement (weight, body fat %, BMI, ...) at a point in time.
+    struct QuantitySample: Identifiable {
+        /// The HealthKit sample's own UUID, so a sample this app wrote can be found again to delete it.
+        var id = UUID()
+        let date: Date
+        let value: Double
+        /// Written by this app (and so deletable from it) rather than by a scale or another app.
+        var isFromThisApp = false
+    }
+
+    /// A coarse workout category, independent of HealthKit's much larger `HKWorkoutActivityType`
+    /// enum, with a Portuguese label and SF Symbol ready for display.
+    enum WorkoutKind: CaseIterable {
+        case running, walking, hiking, cycling, swimming, strengthTraining, functionalTraining, yoga, elliptical, rowing, dance, other
+
+        var displayName: String {
+            switch self {
+            case .running: return "Corrida"
+            case .walking: return "Caminhada"
+            case .hiking: return "Caminhada (Trilho)"
+            case .cycling: return "Ciclismo"
+            case .swimming: return "Natação"
+            case .strengthTraining: return "Musculação"
+            case .functionalTraining: return "Treino Funcional"
+            case .yoga: return "Yoga"
+            case .elliptical: return "Elíptica"
+            case .rowing: return "Remo"
+            case .dance: return "Dança"
+            case .other: return "Atividade"
+            }
+        }
+
+        var symbolName: String {
+            switch self {
+            case .running: return "figure.run"
+            case .walking: return "figure.walk"
+            case .hiking: return "figure.hiking"
+            case .cycling: return "figure.outdoor.cycle"
+            case .swimming: return "figure.pool.swim"
+            case .strengthTraining: return "figure.strengthtraining.traditional"
+            case .functionalTraining: return "figure.highintensity.intervaltraining"
+            case .yoga: return "figure.yoga"
+            case .elliptical: return "figure.elliptical"
+            case .rowing: return "figure.rower"
+            case .dance: return "figure.dance"
+            case .other: return "figure.mixed.cardio"
+            }
+        }
+    }
+
+    /// One completed workout/activity session.
+    struct WorkoutSummary: Identifiable {
+        let id = UUID()
+        let kind: WorkoutKind
+        let startDate: Date
+        let duration: TimeInterval
+        let caloriesBurned: Double?
+        /// Distance covered (m), for the sports Health measures it for; `nil` otherwise.
+        var distanceMeters: Double? = nil
+    }
+
+    /// One workout as needed for personal records: its totals plus, for runs, rides and swims,
+    /// the fastest time over each standard distance (`PersonalRecords.bestEffortDistances`)
+    /// covered within it.
+    struct RecordWorkout: Identifiable {
+        let id: UUID
+        let kind: WorkoutKind
+        let startDate: Date
+        let duration: TimeInterval
+        let distanceMeters: Double?
+        let caloriesBurned: Double?
+        /// Fastest time (s) per standard distance (m).
+        let bestEfforts: [Double: TimeInterval]
+    }
+
+    /// One `health_samples` row for the platform sync (see `syncPayload(from:to:)`).
+    struct SyncSample {
+        let id: UUID
+        let type: String
+        let start: Date
+        let end: Date
+        let value: Double
+        let unit: String
+
+        var row: [String: Any] {
+            ["id": id.uuidString, "type": type, "start_at": SupabaseClient.timestamp(start),
+             "end_at": SupabaseClient.timestamp(end), "value": (value * 100).rounded() / 100, "unit": unit]
+        }
+    }
+
+    /// One `workouts` row for the platform sync.
+    struct SyncWorkout {
+        let id: UUID
+        let activityType: String
+        let name: String
+        let start: Date
+        let durationSeconds: Int
+        let distanceMeters: Double?
+        let averageHeartRate: Int?
+        let energyKcal: Double?
+
+        var row: [String: Any] {
+            ["id": id.uuidString, "activity_type": activityType, "name": name,
+             "started_at": SupabaseClient.timestamp(start), "duration_s": durationSeconds,
+             "distance_m": distanceMeters.map { ($0 * 10).rounded() / 10 } ?? NSNull(),
+             "avg_heart_rate": averageHeartRate ?? NSNull(),
+             "energy_kcal": energyKcal.map { ($0 * 10).rounded() / 10 } ?? NSNull()]
+        }
+    }
+
+    /// Everything Apple Health holds for one sync window.
+    struct SyncPayload {
+        let samples: [SyncSample]
+        let workouts: [SyncWorkout]
+    }
+
+    /// The `health_samples` types the sync owns: each window replaces all of them.
+    static let syncedSampleTypes = [
+        "water", "active_energy", "basal_energy", "weight", "body_fat", "lean_mass", "waist",
+        "sleep_in_bed", "sleep_core", "sleep_deep", "sleep_rem", "sleep_awake"
+    ]
+
+    /// A stable id for an aggregated bucket (type + start), so re-sending it updates the same row.
+    private static func bucketID(type: String, start: Date) -> UUID {
+        var bytes = Array(SHA256.hash(data: Data("CalorieBuddy.health.\(type).\(Int(start.timeIntervalSince1970))".utf8)).prefix(16))
+        bytes[6] = (bytes[6] & 0x0F) | 0x50 // version 5 (name-based)
+        bytes[8] = (bytes[8] & 0x3F) | 0x80 // RFC 4122 variant
+        return UUID(uuid: (bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                           bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]))
+    }
+
+    /// The platform's activity categories (`workouts.activity_type`).
+    private static func platformActivityType(for kind: WorkoutKind) -> String {
+        switch kind {
+        case .running: return "run"
+        case .cycling: return "bike"
+        case .swimming: return "swim"
+        case .strengthTraining, .functionalTraining: return "strength"
+        case .walking, .hiking: return "walk"
+        case .yoga, .elliptical, .rowing, .dance, .other: return "other"
+        }
+    }
+
+    /// Every workout ever recorded in Apple Health, for the personal-records screen. Loaded on
+    /// demand by `loadRecordWorkouts()`, since it spans all history rather than a date range.
+    private(set) var recordWorkouts: [RecordWorkout] = []
+    private(set) var isLoadingRecords = false
+
+    /// Litres of water logged per calendar day (key = start of day).
+    private(set) var waterLitersByDay: [Date: Double] = [:]
+    /// Active energy burned per calendar day, in kcal (key = start of day).
+    private(set) var caloriesBurnedByDay: [Date: Double] = [:]
+    /// Caffeine logged per calendar day, in mg (key = start of day).
+    private(set) var caffeineMgByDay: [Date: Double] = [:]
+    /// Hours asleep per calendar day (key = start of the day the sleep session started).
+    private(set) var sleepHoursByDay: [Date: Double] = [:]
+    /// Completed workouts per calendar day (key = start of the day the workout started).
+    private(set) var workoutsByDay: [Date: [WorkoutSummary]] = [:]
+    private(set) var weightHistory: [QuantitySample] = []
+    private(set) var bodyFatHistory: [QuantitySample] = []
+    private(set) var bmiHistory: [QuantitySample] = []
+    /// Lean body mass (kg) — what smart scales write to Apple Health; muscle mass itself has no
+    /// Health type, so it's entered in the app (see `BodyMetric.muscleMass`).
+    private(set) var leanMassHistory: [QuantitySample] = []
+    private(set) var waistHistory: [QuantitySample] = []
+    /// Most recent height (m), to work out BMI when no app writes it to Health.
+    private(set) var latestHeightMeters: Double?
+    private(set) var lastError: String?
+
+    /// Caffeine in one "café" — a standard 50 ml Portuguese espresso — used to log and count
+    /// coffees via the caffeine quantity type (HealthKit has no dedicated "cups of coffee" type).
+    private let mgCaffeinePerCup: Double = 50
+
+    var todayWaterLiters: Double { waterLiters(on: .now) }
+    var latestWeightKG: Double? { weightHistory.first?.value }
+
+    func waterLiters(on day: Date) -> Double {
+        waterLitersByDay[Calendar.current.startOfDay(for: day)] ?? 0
+    }
+
+    func caloriesBurned(on day: Date) -> Int {
+        Int((caloriesBurnedByDay[Calendar.current.startOfDay(for: day)] ?? 0).rounded())
+    }
+
+    func coffeeCount(on day: Date) -> Int {
+        let mg = caffeineMgByDay[Calendar.current.startOfDay(for: day)] ?? 0
+        return Int((mg / mgCaffeinePerCup).rounded())
+    }
+
+    func sleepHours(on day: Date) -> Double {
+        sleepHoursByDay[Calendar.current.startOfDay(for: day)] ?? 0
+    }
+
+    func workouts(on day: Date) -> [WorkoutSummary] {
+        workoutsByDay[Calendar.current.startOfDay(for: day)] ?? []
+    }
+
+    func totalWorkoutCalories(on day: Date) -> Int {
+        Int(workouts(on: day).reduce(0) { $0 + ($1.caloriesBurned ?? 0) }.rounded())
+    }
+
+    func weightKG(on day: Date) -> Double? {
+        Self.latestValue(in: weightHistory, on: day)
+    }
+
+    func bodyFatPercent(on day: Date) -> Double? {
+        Self.latestValue(in: bodyFatHistory, on: day)
+    }
+
+    func bmi(on day: Date) -> Double? {
+        Self.latestValue(in: bmiHistory, on: day)
+    }
+
+    private static func latestValue(in history: [QuantitySample], on day: Date) -> Double? {
+        history.first { Calendar.current.isDate($0.date, inSameDayAs: day) }?.value
+    }
+
+    #if canImport(HealthKit) && os(iOS)
+    private let store = HKHealthStore()
+    private let weightType = HKQuantityType.quantityType(forIdentifier: .bodyMass)!
+    private let bodyFatType = HKQuantityType.quantityType(forIdentifier: .bodyFatPercentage)!
+    private let bmiType = HKQuantityType.quantityType(forIdentifier: .bodyMassIndex)!
+    private let leanMassType = HKQuantityType.quantityType(forIdentifier: .leanBodyMass)!
+    private let waistType = HKQuantityType.quantityType(forIdentifier: .waistCircumference)!
+    private let heightType = HKQuantityType.quantityType(forIdentifier: .height)!
+    private let waterType = HKQuantityType.quantityType(forIdentifier: .dietaryWater)!
+    private let activeEnergyType = HKQuantityType.quantityType(forIdentifier: .activeEnergyBurned)!
+    private let basalEnergyType = HKQuantityType.quantityType(forIdentifier: .basalEnergyBurned)!
+    private let heartRateType = HKQuantityType.quantityType(forIdentifier: .heartRate)!
+    private let caffeineType = HKQuantityType.quantityType(forIdentifier: .dietaryCaffeine)!
+    private let sleepType = HKObjectType.categoryType(forIdentifier: .sleepAnalysis)!
+    private let runningDistanceType = HKQuantityType.quantityType(forIdentifier: .distanceWalkingRunning)!
+    private let cyclingDistanceType = HKQuantityType.quantityType(forIdentifier: .distanceCycling)!
+    private let swimmingDistanceType = HKQuantityType.quantityType(forIdentifier: .distanceSwimming)!
+    private let rowingDistanceType = HKQuantityType.quantityType(forIdentifier: .distanceRowing)!
+
+    /// Best efforts already computed per workout — they never change, and computing them needs
+    /// one distance-samples query per run, so reopening the records screen shouldn't redo it.
+    private var bestEffortsCache: [UUID: [Double: TimeInterval]] = [:]
+
+    var isSupported: Bool { HKHealthStore.isHealthDataAvailable() }
+
+    private static func workoutKind(for activityType: HKWorkoutActivityType) -> WorkoutKind {
+        switch activityType {
+        case .running: return .running
+        case .walking: return .walking
+        case .hiking: return .hiking
+        case .cycling: return .cycling
+        case .swimming: return .swimming
+        case .traditionalStrengthTraining, .functionalStrengthTraining: return .strengthTraining
+        case .highIntensityIntervalTraining, .coreTraining, .crossTraining, .mixedCardio: return .functionalTraining
+        case .yoga: return .yoga
+        case .elliptical: return .elliptical
+        case .rowing: return .rowing
+        case .cardioDance, .socialDance: return .dance
+        default: return .other
+        }
+    }
+
+    func requestAuthorization() async {
+        guard isSupported else { return }
+        do {
+            try await store.requestAuthorization(
+                toShare: [weightType, waterType, caffeineType, bodyFatType, leanMassType, waistType],
+                read: [
+                    weightType, bodyFatType, bmiType, leanMassType, waistType, heightType, waterType, activeEnergyType, basalEnergyType, heartRateType,
+                    caffeineType, sleepType, HKObjectType.workoutType(), runningDistanceType, cyclingDistanceType, swimmingDistanceType, rowingDistanceType
+                ]
+            )
+            await refresh()
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    /// Refreshes weight/body-fat/BMI history plus the last `days` days of water, active-energy,
+    /// caffeine, sleep and workout data. `days` can span years (the Evolução chart allows up to
+    /// 2), so the daily totals use one bulk statistics-collection query per metric rather than
+    /// one query per day.
+    ///
+    /// Callers that need a specific range (Histórico's pagination, a particular day in DayView,
+    /// the Evolução chart's period picker) should always pass `days` explicitly — this default
+    /// only covers simple "just refresh what I already had" calls like after logging water.
+    func refresh(days: Int = 30) async {
+        guard isSupported else { return }
+        let historyLimit = max(30, days)
+        weightHistory = await fetchQuantityHistory(for: weightType, unit: .gramUnit(with: .kilo), limit: historyLimit)
+        bodyFatHistory = await fetchQuantityHistory(for: bodyFatType, unit: .percent(), limit: historyLimit)
+        bmiHistory = await fetchQuantityHistory(for: bmiType, unit: .count(), limit: historyLimit)
+        leanMassHistory = await fetchQuantityHistory(for: leanMassType, unit: .gramUnit(with: .kilo), limit: historyLimit)
+        waistHistory = await fetchQuantityHistory(for: waistType, unit: .meterUnit(with: .centi), limit: historyLimit)
+        latestHeightMeters = await fetchQuantityHistory(for: heightType, unit: .meter(), limit: 1).first?.value
+        waterLitersByDay = await fetchDailyTotals(for: waterType, unit: .liter(), days: days)
+        caloriesBurnedByDay = await fetchDailyTotals(for: activeEnergyType, unit: .kilocalorie(), days: days)
+        caffeineMgByDay = await fetchDailyTotals(for: caffeineType, unit: .gramUnit(with: .milli), days: days)
+        sleepHoursByDay = await fetchSleepHoursByDay(days: days)
+        workoutsByDay = await fetchWorkoutsByDay(days: days)
+    }
+
+    func logWater(liters: Double) async {
+        guard isSupported, liters > 0 else { return }
+        let sample = HKQuantitySample(
+            type: waterType,
+            quantity: HKQuantity(unit: .liter(), doubleValue: liters),
+            start: .now,
+            end: .now
+        )
+        do {
+            try await store.save(sample)
+            await refresh()
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    /// Logs one café (as 50mg of caffeine, HealthKit's closest equivalent quantity type).
+    func logCoffee() async {
+        guard isSupported else { return }
+        let sample = HKQuantitySample(
+            type: caffeineType,
+            quantity: HKQuantity(unit: .gramUnit(with: .milli), doubleValue: mgCaffeinePerCup),
+            start: .now,
+            end: .now
+        )
+        do {
+            try await store.save(sample)
+            await refresh()
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    /// Removes the most recently logged caffeine sample on `day`, i.e. undoes one café.
+    /// HealthKit only allows deleting samples this app itself wrote, so this silently does
+    /// nothing if the last sample on that day came from another app.
+    func removeLastCoffee(on day: Date) async {
+        guard isSupported else { return }
+        let calendar = Calendar.current
+        let dayStart = calendar.startOfDay(for: day)
+        guard let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) else { return }
+        let predicate = HKQuery.predicateForSamples(withStart: dayStart, end: dayEnd)
+        let descriptor = HKSampleQueryDescriptor(
+            predicates: [.quantitySample(type: caffeineType, predicate: predicate)],
+            sortDescriptors: [SortDescriptor(\HKQuantitySample.startDate, order: .reverse)],
+            limit: 1
+        )
+        guard let lastSample = try? await descriptor.result(for: store).first else { return }
+        do {
+            try await store.delete(lastSample)
+            await refresh()
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    /// Writes a body-composition value to Apple Health, for the metrics Health has a type for
+    /// (`BodyMetric.healthKitWritable`). Returns `false` when it couldn't (unsupported metric, no
+    /// permission, …) so the caller can keep the value in the app's own database instead.
+    @discardableResult
+    func logBodyMetric(_ metric: BodyMetric, value: Double, date: Date) async -> Bool {
+        guard isSupported, let (type, unit, scale) = bodyMetricType(metric) else { return false }
+        let sample = HKQuantitySample(type: type, quantity: HKQuantity(unit: unit, doubleValue: value / scale), start: date, end: date)
+        do {
+            try await store.save(sample)
+            return true
+        } catch {
+            lastError = error.localizedDescription
+            return false
+        }
+    }
+
+    /// Deletes a body-composition sample this app wrote (Health refuses other apps' samples).
+    func deleteBodyMetricSample(_ metric: BodyMetric, id: UUID) async {
+        guard isSupported, let (type, _, _) = bodyMetricType(metric) else { return }
+        let descriptor = HKSampleQueryDescriptor(
+            predicates: [.quantitySample(type: type, predicate: HKQuery.predicateForObject(with: id))],
+            sortDescriptors: []
+        )
+        guard let sample = try? await descriptor.result(for: store).first else { return }
+        do {
+            try await store.delete(sample)
+            await refresh(days: 365)
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    /// Health type, unit and the factor from the app's value to Health's (body fat: % → fraction).
+    private func bodyMetricType(_ metric: BodyMetric) -> (HKQuantityType, HKUnit, Double)? {
+        switch metric {
+        case .bodyFat: return (bodyFatType, .percent(), 100)
+        case .leanMass: return (leanMassType, .gramUnit(with: .kilo), 1)
+        case .waist: return (waistType, .meterUnit(with: .centi), 1)
+        default: return nil
+        }
+    }
+
+    func logWeight(kilograms: Double) async {
+        guard isSupported, kilograms > 0 else { return }
+        let sample = HKQuantitySample(
+            type: weightType,
+            quantity: HKQuantity(unit: .gramUnit(with: .kilo), doubleValue: kilograms),
+            start: .now,
+            end: .now
+        )
+        do {
+            try await store.save(sample)
+            await refresh()
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    /// Sums `type` per calendar day, for each of the last `days` days, keyed by start of day.
+    private func fetchDailyTotals(for type: HKQuantityType, unit: HKUnit, days: Int) async -> [Date: Double] {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: .now)
+        guard let anchorDate = calendar.date(byAdding: .day, value: -(days - 1), to: today),
+              let rangeEnd = calendar.date(byAdding: .day, value: 1, to: today) else { return [:] }
+
+        return await withCheckedContinuation { continuation in
+            let query = HKStatisticsCollectionQuery(
+                quantityType: type,
+                quantitySamplePredicate: nil,
+                options: .cumulativeSum,
+                anchorDate: anchorDate,
+                intervalComponents: DateComponents(day: 1)
+            )
+            query.initialResultsHandler = { _, results, _ in
+                var totals: [Date: Double] = [:]
+                results?.enumerateStatistics(from: anchorDate, to: rangeEnd) { statistics, _ in
+                    if let sum = statistics.sumQuantity()?.doubleValue(for: unit), sum > 0 {
+                        totals[calendar.startOfDay(for: statistics.startDate)] = sum
+                    }
+                }
+                continuation.resume(returning: totals)
+            }
+            store.execute(query)
+        }
+    }
+
+    /// The most recent occasional samples (weight, body fat %, BMI, ...) of `type`.
+    private func fetchQuantityHistory(for type: HKQuantityType, unit: HKUnit, limit: Int = 30) async -> [QuantitySample] {
+        let descriptor = HKSampleQueryDescriptor(
+            predicates: [.quantitySample(type: type)],
+            sortDescriptors: [SortDescriptor(\HKQuantitySample.startDate, order: .reverse)],
+            limit: limit
+        )
+        guard let samples = try? await descriptor.result(for: store) else { return [] }
+        return samples.map { sample in
+            QuantitySample(
+                id: sample.uuid,
+                date: sample.startDate,
+                value: sample.quantity.doubleValue(for: unit),
+                isFromThisApp: sample.sourceRevision.source.bundleIdentifier == Bundle.main.bundleIdentifier
+            )
+        }
+    }
+
+    /// Hours actually asleep (excluding "in bed"/"awake" segments) per calendar day, attributed
+    /// to the day each sleep sample started on.
+    private func fetchSleepHoursByDay(days: Int) async -> [Date: Double] {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: .now)
+        guard let rangeStart = calendar.date(byAdding: .day, value: -days, to: today),
+              let rangeEnd = calendar.date(byAdding: .day, value: 1, to: today) else { return [:] }
+        let predicate = HKQuery.predicateForSamples(withStart: rangeStart, end: rangeEnd)
+        let descriptor = HKSampleQueryDescriptor(
+            predicates: [.categorySample(type: sleepType, predicate: predicate)],
+            sortDescriptors: [SortDescriptor(\HKCategorySample.startDate, order: .forward)]
+        )
+        guard let samples = try? await descriptor.result(for: store) else { return [:] }
+
+        let asleepValues: Set<Int> = [
+            HKCategoryValueSleepAnalysis.asleepCore.rawValue,
+            HKCategoryValueSleepAnalysis.asleepDeep.rawValue,
+            HKCategoryValueSleepAnalysis.asleepREM.rawValue,
+            HKCategoryValueSleepAnalysis.asleepUnspecified.rawValue
+        ]
+
+        var totals: [Date: Double] = [:]
+        for sample in samples where asleepValues.contains(sample.value) {
+            let day = calendar.startOfDay(for: sample.startDate)
+            totals[day, default: 0] += sample.endDate.timeIntervalSince(sample.startDate) / 3600
+        }
+        return totals
+    }
+
+    private func distanceType(for kind: WorkoutKind) -> HKQuantityType? {
+        switch kind {
+        case .running, .walking, .hiking: return runningDistanceType
+        case .cycling: return cyclingDistanceType
+        case .swimming: return swimmingDistanceType
+        case .rowing: return rowingDistanceType
+        default: return nil
+        }
+    }
+
+    /// Loads every workout in Apple Health (all history) into `recordWorkouts`, computing the
+    /// best efforts of each run from its distance samples.
+    func loadRecordWorkouts() async {
+        guard isSupported, !isLoadingRecords else { return }
+        isLoadingRecords = true
+        defer { isLoadingRecords = false }
+
+        let descriptor = HKSampleQueryDescriptor(
+            predicates: [.workout()],
+            sortDescriptors: [SortDescriptor(\HKWorkout.startDate, order: .reverse)]
+        )
+        guard let workouts = try? await descriptor.result(for: store) else { return }
+
+        var records: [RecordWorkout] = []
+        for workout in workouts {
+            let kind = Self.workoutKind(for: workout.workoutActivityType)
+            let distance = distanceType(for: kind)
+                .flatMap { workout.statistics(for: $0)?.sumQuantity()?.doubleValue(for: .meter()) }
+                .flatMap { $0 > 0 ? $0 : nil }
+            var efforts: [Double: TimeInterval] = [:]
+            let targets = PersonalRecords.bestEffortDistances(for: kind).filter { $0 <= (distance ?? 0) }
+            if !targets.isEmpty, let type = distanceType(for: kind) {
+                if let cached = bestEffortsCache[workout.uuid] {
+                    efforts = cached
+                } else {
+                    efforts = await bestEfforts(in: workout, type: type, targets: targets)
+                    bestEffortsCache[workout.uuid] = efforts
+                }
+            }
+            records.append(RecordWorkout(
+                id: workout.uuid,
+                kind: kind,
+                startDate: workout.startDate,
+                duration: workout.duration,
+                distanceMeters: distance,
+                caloriesBurned: workout.statistics(for: activeEnergyType)?.sumQuantity()?.doubleValue(for: .kilocalorie()),
+                bestEfforts: efforts
+            ))
+        }
+        recordWorkouts = records
+    }
+
+    /// Fastest time over each of `targets` metres within one workout, from the distance samples
+    /// (of `type`) the Watch/iPhone recorded during it — every few seconds for runs and rides,
+    /// one per length for pool swims.
+    private func bestEfforts(in workout: HKWorkout, type: HKQuantityType, targets: [Double]) async -> [Double: TimeInterval] {
+        let descriptor = HKSampleQueryDescriptor(
+            predicates: [.quantitySample(type: type, predicate: HKQuery.predicateForObjects(from: workout))],
+            sortDescriptors: [SortDescriptor(\HKQuantitySample.startDate, order: .forward)]
+        )
+        guard let samples = try? await descriptor.result(for: store), let first = samples.first else { return [:] }
+        var times = [first.startDate.timeIntervalSinceReferenceDate]
+        var cumulative = [0.0]
+        for sample in samples {
+            cumulative.append(cumulative[cumulative.count - 1] + sample.quantity.doubleValue(for: .meter()))
+            times.append(sample.endDate.timeIntervalSinceReferenceDate)
+        }
+        return PersonalRecords.bestEfforts(
+            times: times,
+            cumulativeDistances: cumulative,
+            targets: targets
+        )
+    }
+
+    /// Workouts (runs, gym sessions, walks, ...) over the last `days` days, grouped by the
+    /// calendar day each one started on.
+    private func fetchWorkoutsByDay(days: Int) async -> [Date: [WorkoutSummary]] {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: .now)
+        guard let rangeStart = calendar.date(byAdding: .day, value: -days, to: today),
+              let rangeEnd = calendar.date(byAdding: .day, value: 1, to: today) else { return [:] }
+        let predicate = HKQuery.predicateForSamples(withStart: rangeStart, end: rangeEnd)
+        let descriptor = HKSampleQueryDescriptor(
+            predicates: [.workout(predicate)],
+            sortDescriptors: [SortDescriptor(\HKWorkout.startDate, order: .forward)]
+        )
+        guard let workouts = try? await descriptor.result(for: store) else { return [:] }
+
+        var byDay: [Date: [WorkoutSummary]] = [:]
+        for workout in workouts {
+            let day = calendar.startOfDay(for: workout.startDate)
+            let calories = workout.statistics(for: activeEnergyType)?.sumQuantity()?.doubleValue(for: .kilocalorie())
+            let kind = Self.workoutKind(for: workout.workoutActivityType)
+            let distance = distanceType(for: kind)
+                .flatMap { workout.statistics(for: $0)?.sumQuantity()?.doubleValue(for: .meter()) }
+                .flatMap { $0 > 0 ? $0 : nil }
+            let summary = WorkoutSummary(
+                kind: kind,
+                startDate: workout.startDate,
+                duration: workout.duration,
+                caloriesBurned: calories,
+                distanceMeters: distance
+            )
+            byDay[day, default: []].append(summary)
+        }
+        return byDay
+    }
+
+    // MARK: Platform sync
+
+    /// Everything Apple Health holds that starts in [`from`, `to`), shaped as the platform's
+    /// `health_samples` / `workouts` rows. Throws (instead of returning less) when Health can't be
+    /// read — e.g. the iPhone is locked — so the sync never mistakes "unreadable" for "deleted".
+    ///
+    /// - Water and energy are summed per hour with HealthKit's statistics, which de-duplicate
+    ///   overlapping sources (iPhone + Watch); raw samples would count the same kcal twice.
+    /// - Sleep keeps, for each night, the stages of the one source that recorded the most sleep
+    ///   (usually the Watch), plus every "in bed" interval (the dashboard only uses their edges).
+    func syncPayload(from: Date, to: Date) async throws -> SyncPayload? {
+        guard isSupported else { return nil }
+        var samples: [SyncSample] = []
+        samples += try await hourlyBuckets(of: waterType, unit: .literUnit(with: .milli), as: "water", platformUnit: "ml", from: from, to: to)
+        samples += try await hourlyBuckets(of: activeEnergyType, unit: .kilocalorie(), as: "active_energy", platformUnit: "kcal", from: from, to: to)
+        samples += try await hourlyBuckets(of: basalEnergyType, unit: .kilocalorie(), as: "basal_energy", platformUnit: "kcal", from: from, to: to)
+        samples += try await quantitySamples(of: weightType, unit: .gramUnit(with: .kilo), scale: 1, as: "weight", platformUnit: "kg", from: from, to: to)
+        samples += try await quantitySamples(of: bodyFatType, unit: .percent(), scale: 100, as: "body_fat", platformUnit: "%", from: from, to: to)
+        samples += try await quantitySamples(of: leanMassType, unit: .gramUnit(with: .kilo), scale: 1, as: "lean_mass", platformUnit: "kg", from: from, to: to)
+        samples += try await quantitySamples(of: waistType, unit: .meterUnit(with: .centi), scale: 1, as: "waist", platformUnit: "cm", from: from, to: to)
+        samples += try await sleepSamples(from: from, to: to)
+        return SyncPayload(samples: samples, workouts: try await syncWorkouts(from: from, to: to))
+    }
+
+    private func windowPredicate(from: Date, to: Date) -> NSPredicate {
+        HKQuery.predicateForSamples(withStart: from, end: to, options: .strictStartDate)
+    }
+
+    private func hourlyBuckets(of type: HKQuantityType, unit: HKUnit, as platformType: String, platformUnit: String,
+                               from: Date, to: Date) async throws -> [SyncSample] {
+        try await withCheckedThrowingContinuation { continuation in
+            let query = HKStatisticsCollectionQuery(
+                quantityType: type,
+                quantitySamplePredicate: HKQuery.predicateForSamples(withStart: from, end: to),
+                options: .cumulativeSum,
+                anchorDate: from,
+                intervalComponents: DateComponents(hour: 1)
+            )
+            query.initialResultsHandler = { _, results, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                    return
+                }
+                var buckets: [SyncSample] = []
+                results?.enumerateStatistics(from: from, to: to) { statistics, _ in
+                    guard statistics.startDate >= from, statistics.startDate < to,
+                          let sum = statistics.sumQuantity()?.doubleValue(for: unit), sum > 0 else { return }
+                    buckets.append(SyncSample(
+                        id: Self.bucketID(type: platformType, start: statistics.startDate),
+                        type: platformType,
+                        start: statistics.startDate,
+                        // Inside the hour, so the bucket counts for the day it started on.
+                        end: statistics.endDate.addingTimeInterval(-1),
+                        value: sum,
+                        unit: platformUnit
+                    ))
+                }
+                continuation.resume(returning: buckets)
+            }
+            store.execute(query)
+        }
+    }
+
+    private func quantitySamples(of type: HKQuantityType, unit: HKUnit, scale: Double, as platformType: String,
+                                 platformUnit: String, from: Date, to: Date) async throws -> [SyncSample] {
+        let descriptor = HKSampleQueryDescriptor(
+            predicates: [.quantitySample(type: type, predicate: windowPredicate(from: from, to: to))],
+            sortDescriptors: [SortDescriptor(\HKQuantitySample.startDate, order: .forward)]
+        )
+        return try await descriptor.result(for: store).map { sample in
+            SyncSample(id: sample.uuid, type: platformType, start: sample.startDate, end: sample.endDate,
+                       value: sample.quantity.doubleValue(for: unit) * scale, unit: platformUnit)
+        }
+    }
+
+    private func sleepSamples(from: Date, to: Date) async throws -> [SyncSample] {
+        let descriptor = HKSampleQueryDescriptor(
+            predicates: [.categorySample(type: sleepType, predicate: windowPredicate(from: from, to: to))],
+            sortDescriptors: [SortDescriptor(\HKCategorySample.startDate, order: .forward)]
+        )
+        let samples = try await descriptor.result(for: store)
+
+        func platformType(_ value: Int) -> String? {
+            switch HKCategoryValueSleepAnalysis(rawValue: value) {
+            case .inBed: return "sleep_in_bed"
+            case .asleepCore, .asleepUnspecified: return "sleep_core"
+            case .asleepDeep: return "sleep_deep"
+            case .asleepREM: return "sleep_rem"
+            case .awake: return "sleep_awake"
+            default: return nil
+            }
+        }
+        // The night a sample belongs to, like the database's sleep_day(): anything ending after
+        // 18:00 counts for the next morning.
+        let calendar = Calendar.current
+        func night(_ sample: HKCategorySample) -> Date {
+            calendar.startOfDay(for: sample.endDate.addingTimeInterval(6 * 3600))
+        }
+        func source(_ sample: HKCategorySample) -> String { sample.sourceRevision.source.bundleIdentifier }
+
+        var asleepMinutes: [Date: [String: Double]] = [:]
+        for sample in samples {
+            guard let type = platformType(sample.value), type != "sleep_in_bed", type != "sleep_awake" else { continue }
+            asleepMinutes[night(sample), default: [:]][source(sample), default: 0] += sample.endDate.timeIntervalSince(sample.startDate) / 60
+        }
+        let chosenSource = asleepMinutes.mapValues { bySource in bySource.max { $0.value < $1.value }?.key }
+
+        return samples.compactMap { sample in
+            guard let type = platformType(sample.value) else { return nil }
+            if type != "sleep_in_bed", chosenSource[night(sample)] ?? nil != source(sample) { return nil }
+            return SyncSample(id: sample.uuid, type: type, start: sample.startDate, end: sample.endDate,
+                              value: sample.endDate.timeIntervalSince(sample.startDate) / 60, unit: "min")
+        }
+    }
+
+    private func syncWorkouts(from: Date, to: Date) async throws -> [SyncWorkout] {
+        let descriptor = HKSampleQueryDescriptor(
+            predicates: [.workout(windowPredicate(from: from, to: to))],
+            sortDescriptors: [SortDescriptor(\HKWorkout.startDate, order: .forward)]
+        )
+        let beatsPerMinute = HKUnit.count().unitDivided(by: .minute())
+        return try await descriptor.result(for: store).map { workout in
+            let kind = Self.workoutKind(for: workout.workoutActivityType)
+            let distance = distanceType(for: kind)
+                .flatMap { workout.statistics(for: $0)?.sumQuantity()?.doubleValue(for: .meter()) }
+                .flatMap { $0 > 0 ? $0 : nil }
+            let heartRate = workout.statistics(for: heartRateType)?.averageQuantity()
+                .map { Int($0.doubleValue(for: beatsPerMinute).rounded()) }
+                .flatMap { (30...250).contains($0) ? $0 : nil }
+            return SyncWorkout(
+                id: workout.uuid,
+                activityType: Self.platformActivityType(for: kind),
+                name: kind.displayName,
+                start: workout.startDate,
+                durationSeconds: max(1, Int(workout.duration.rounded())),
+                distanceMeters: distance,
+                averageHeartRate: heartRate,
+                energyKcal: workout.statistics(for: activeEnergyType)?.sumQuantity()?.doubleValue(for: .kilocalorie())
+            )
+        }
+    }
+    #else
+    var isSupported: Bool { false }
+    func requestAuthorization() async {}
+    func refresh(days: Int = 30) async {}
+    func logWater(liters: Double) async {}
+    func logWeight(kilograms: Double) async {}
+    @discardableResult
+    func logBodyMetric(_ metric: BodyMetric, value: Double, date: Date) async -> Bool { false }
+    func deleteBodyMetricSample(_ metric: BodyMetric, id: UUID) async {}
+    func logCoffee() async {}
+    func removeLastCoffee(on day: Date) async {}
+    func loadRecordWorkouts() async {}
+    func syncPayload(from: Date, to: Date) async throws -> SyncPayload? { nil }
+    #endif
+}

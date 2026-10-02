@@ -2,10 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   Connection to the IronMan Project platform (the Api Supabase project). Copy to:
-    MyApp/Supabase-Debug.plist    Debug builds  → local Supabase (cd Api && supabase status -o env)
+    MyApp/Resources/Config/Supabase-Debug.plist    Debug builds  → local Supabase (cd Api && supabase status -o env)
                                     URL: http://127.0.0.1:54321 in the Simulator, or
                                          http://<your-mac>.local:54321 from an iPhone on the same Wi-Fi
-    MyApp/Supabase-Release.plist  Release/TestFlight → the VPS (https://<API_DOMAIN>)
+    MyApp/Resources/Config/Supabase-Release.plist  Release/TestFlight → the VPS (https://<API_DOMAIN>)
   Both are git-ignored. Only the URL and the PUBLISHABLE key go here (public by design, RLS
   protects the data) — never the secret/service_role key.
 -->

@@ -262,9 +262,9 @@
 				INFOPLIST_FILE = "CalorieBuddy-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = CalorieBuddy;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.healthcare-fitness";
-				INFOPLIST_KEY_NSCameraUsageDescription = "A CalorieBuddy usa a câmara para digitalizar códigos de barras de alimentos.";
-				INFOPLIST_KEY_NSHealthShareUsageDescription = "A CalorieBuddy lê o teu peso, massa gorda, IMC, sono, água, café, calorias queimadas, frequência cardíaca e treinos da app Saúde para os mostrar aqui, calcular os teus recordes pessoais e, se iniciares sessão, sincronizá-los com a tua plataforma IronMan Project.";
-				INFOPLIST_KEY_NSHealthUpdateUsageDescription = "A CalorieBuddy grava o peso, a água e o café que registares aqui na app Saúde.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "A CalorieBuddy usa a câmara para digitalizar códigos de barras e para fotografar alimentos, receitas, suplementos e a tua evolução física, e refeições ou rótulos que queiras enviar a um assistente de IA.";
+				INFOPLIST_KEY_NSHealthShareUsageDescription = "A CalorieBuddy lê o teu peso, altura, massa gorda, massa magra, IMC, perímetro da cintura, sono, água, café, calorias queimadas, frequência cardíaca e treinos da app Saúde para os mostrar aqui, calcular os teus recordes pessoais e, se iniciares sessão, sincronizá-los com a tua plataforma IronMan Project.";
+				INFOPLIST_KEY_NSHealthUpdateUsageDescription = "A CalorieBuddy grava na app Saúde o peso, a massa gorda, a massa magra, o perímetro da cintura, a água e o café que registares aqui.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -312,9 +312,9 @@
 				INFOPLIST_FILE = "CalorieBuddy-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = CalorieBuddy;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.healthcare-fitness";
-				INFOPLIST_KEY_NSCameraUsageDescription = "A CalorieBuddy usa a câmara para digitalizar códigos de barras de alimentos.";
-				INFOPLIST_KEY_NSHealthShareUsageDescription = "A CalorieBuddy lê o teu peso, massa gorda, IMC, sono, água, café, calorias queimadas, frequência cardíaca e treinos da app Saúde para os mostrar aqui, calcular os teus recordes pessoais e, se iniciares sessão, sincronizá-los com a tua plataforma IronMan Project.";
-				INFOPLIST_KEY_NSHealthUpdateUsageDescription = "A CalorieBuddy grava o peso, a água e o café que registares aqui na app Saúde.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "A CalorieBuddy usa a câmara para digitalizar códigos de barras e para fotografar alimentos, receitas, suplementos e a tua evolução física, e refeições ou rótulos que queiras enviar a um assistente de IA.";
+				INFOPLIST_KEY_NSHealthShareUsageDescription = "A CalorieBuddy lê o teu peso, altura, massa gorda, massa magra, IMC, perímetro da cintura, sono, água, café, calorias queimadas, frequência cardíaca e treinos da app Saúde para os mostrar aqui, calcular os teus recordes pessoais e, se iniciares sessão, sincronizá-los com a tua plataforma IronMan Project.";
+				INFOPLIST_KEY_NSHealthUpdateUsageDescription = "A CalorieBuddy grava na app Saúde o peso, a massa gorda, a massa magra, o perímetro da cintura, a água e o café que registares aqui.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
