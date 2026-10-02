@@ -12,11 +12,12 @@ struct NutritionPlanEditorView: View {
 
     @State private var name = ""
     @State private var startsOn = Date()
+    @State private var isTemporary = false
+    @State private var endsOn = Date()
+    @State private var priority = 1
     @State private var notes = ""
     @State private var training = NutritionPlanEditorView.defaultTargets
     @State private var rest = NutritionPlanEditorView.defaultTargets
-
-    @State private var errorMessage: String?
 
     private static let defaultTargets = NutritionTargets(kcal: 2500, proteinG: 150, carbsG: 300, fatG: 80, waterML: 3000)
 
@@ -31,6 +32,8 @@ struct NutritionPlanEditorView: View {
     private var isValid: Bool {
         (2...80).contains(trimmedName.count) && trimmedNotes.count <= 4000
             && isValid(training) && isValid(rest)
+            // Same check as the platform's `nutrition_plans` (ends_on >= starts_on).
+            && (!isTemporary || Calendar.current.startOfDay(for: endsOn) >= Calendar.current.startOfDay(for: startsOn))
     }
 
     private func isValid(_ targets: NutritionTargets) -> Bool {
@@ -47,10 +50,19 @@ struct NutritionPlanEditorView: View {
                 Section {
                     TextField("Nome", text: $name)
                     DatePicker("Data de Início", selection: $startsOn, displayedComponents: .date)
+                    Toggle("Plano Temporário", isOn: $isTemporary.animation())
+                    if isTemporary {
+                        DatePicker("Data de Fim", selection: $endsOn, in: startsOn..., displayedComponents: .date)
+                    }
+                    Picker("Prioridade", selection: $priority) {
+                        ForEach(1...5, id: \.self) { level in
+                            Text(level == 1 ? "1 — plano normal" : level == 5 ? "5 — máxima" : "\(level)").tag(level)
+                        }
+                    }
                 } header: {
                     Text("Plano")
                 } footer: {
-                    Text("Os objetivos aplicam-se a partir desta data até começar o próximo plano.")
+                    Text("Em aberto por omissão. Quando mais do que um plano cobre o mesmo dia, aplica-se o de prioridade mais alta.")
                 }
 
                 Section {
@@ -76,16 +88,9 @@ struct NutritionPlanEditorView: View {
                 }
             }
             .onAppear(perform: populate)
-            .alert(
-                "Erro ao Guardar",
-                isPresented: Binding(
-                    get: { errorMessage != nil },
-                    set: { if !$0 { errorMessage = nil } }
-                )
-            ) {
-                Button("OK", role: .cancel) { errorMessage = nil }
-            } message: {
-                Text(errorMessage ?? "")
+            // Moving the start past the end would leave an invalid range; keep the end with it.
+            .onChange(of: startsOn) {
+                if endsOn < startsOn { endsOn = startsOn }
             }
         }
     }
@@ -128,6 +133,9 @@ struct NutritionPlanEditorView: View {
         if let planToEdit {
             name = planToEdit.name
             startsOn = planToEdit.startsOn
+            isTemporary = planToEdit.endsOn != nil
+            endsOn = planToEdit.endsOn ?? planToEdit.startsOn
+            priority = planToEdit.priority
             notes = planToEdit.notes ?? ""
             training = planToEdit.training
             rest = planToEdit.rest
@@ -136,11 +144,18 @@ struct NutritionPlanEditorView: View {
 
         if let duplicateFrom {
             name = "\(duplicateFrom.name) (cópia)"
+            isTemporary = duplicateFrom.endsOn != nil
+            priority = duplicateFrom.priority
             notes = duplicateFrom.notes ?? ""
             training = duplicateFrom.training
             rest = duplicateFrom.rest
         }
         startsOn = defaultStartDate()
+        // A duplicated temporary plan keeps the original's length (e.g. the same 3-week block).
+        let length = duplicateFrom.flatMap { source in
+            source.endsOn.flatMap { Calendar.current.dateComponents([.day], from: source.startsOn, to: $0).day }
+        } ?? 0
+        endsOn = Calendar.current.date(byAdding: .day, value: length, to: startsOn) ?? startsOn
     }
 
     /// A week after the last scheduled plan's start date, or tomorrow if none is scheduled —
@@ -160,15 +175,13 @@ struct NutritionPlanEditorView: View {
     private func save() {
         guard isValid else { return }
         let day = Calendar.current.startOfDay(for: startsOn)
-        guard !store.isNutritionPlanStartDateTaken(day, excluding: planToEdit?.id) else {
-            errorMessage = "Já existe um plano a começar neste dia."
-            return
-        }
 
         let plan = NutritionPlan(
             id: planToEdit?.id ?? UUID(),
             name: trimmedName,
             startsOn: day,
+            endsOn: isTemporary ? Calendar.current.startOfDay(for: endsOn) : nil,
+            priority: priority,
             notes: trimmedNotes.isEmpty ? nil : trimmedNotes,
             training: training,
             rest: rest,

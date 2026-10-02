@@ -1,9 +1,9 @@
 import SwiftUI
 
-/// Lists nutrition plans grouped by status (em vigor / agendados / anteriores), each with its
-/// training and rest targets. Mirrors the platform's `/dashboard/plans` page, so a plan created
-/// here has the exact same shape it would need to be written straight into `nutrition_plans` +
-/// `nutrition_targets` once the app migrates to that backend.
+/// Lists nutrition plans grouped by status (ativos / agendados / terminados), each with its
+/// training and rest targets. Active plans can overlap (date range + priority); the one actually
+/// applied today is highlighted ("Em Vigor"), others shown as overridden. Mirrors the platform's
+/// `/dashboard/plans` page.
 struct NutritionPlansListView: View {
     @Environment(DataStore.self) private var store
 
@@ -14,9 +14,13 @@ struct NutritionPlansListView: View {
     private var classified: [ClassifiedNutritionPlan] {
         store.nutritionPlans.classified(today: .now)
     }
-    private var current: [ClassifiedNutritionPlan] { classified.filter { $0.status == .current } }
-    private var upcoming: [ClassifiedNutritionPlan] { classified.filter { $0.status == .upcoming } }
-    private var past: [ClassifiedNutritionPlan] { Array(classified.filter { $0.status == .past }.reversed()) }
+    // The plan in effect first, then other active plans by priority (highest first).
+    private var active: [ClassifiedNutritionPlan] {
+        classified.filter { $0.status == .active }
+            .sorted { ($0.inEffect ? 1 : 0, $0.plan.priority) > ($1.inEffect ? 1 : 0, $1.plan.priority) }
+    }
+    private var scheduled: [ClassifiedNutritionPlan] { classified.filter { $0.status == .scheduled } }
+    private var ended: [ClassifiedNutritionPlan] { Array(classified.filter { $0.status == .ended }.reversed()) }
 
     var body: some View {
         List {
@@ -27,10 +31,10 @@ struct NutritionPlansListView: View {
                     description: Text("Cria o primeiro para definires os objetivos diários de calorias, macros e água.")
                 )
             } else {
-                section(title: "Em Vigor", plans: current, emptyText: "Nenhum plano em vigor hoje.")
-                section(title: "Agendados", plans: upcoming, emptyText: "Nada agendado.")
-                if !past.isEmpty {
-                    section(title: "Planos Anteriores", plans: past, emptyText: nil)
+                section(title: "Ativos", plans: active, emptyText: "Nenhum plano ativo hoje.")
+                section(title: "Agendados", plans: scheduled, emptyText: "Nada agendado.")
+                if !ended.isEmpty {
+                    section(title: "Terminados", plans: ended, emptyText: nil)
                 }
             }
         }
@@ -75,7 +79,10 @@ struct NutritionPlansListView: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(plan.name).font(.headline)
-                    statusBadge(classified.status)
+                    PlanStatusBadge(status: classified.status, inEffect: classified.inEffect)
+                    if plan.priority > 1 {
+                        PlanPriorityBadge(priority: plan.priority)
+                    }
                 }
                 Text(dateRangeLabel(classified))
                     .font(.caption)
@@ -113,37 +120,13 @@ struct NutritionPlansListView: View {
         }
     }
 
-    private func statusBadge(_ status: PlanStatus) -> some View {
-        Text(statusLabel(status))
-            .font(.caption2.weight(.semibold))
-            .padding(.horizontal, 8)
-            .padding(.vertical, 2)
-            .background(statusColor(status).opacity(0.15), in: Capsule())
-            .foregroundStyle(statusColor(status))
-    }
-
-    private func statusLabel(_ status: PlanStatus) -> String {
-        switch status {
-        case .current: return "Em Vigor"
-        case .upcoming: return "Agendado"
-        case .past: return "Terminado"
-        }
-    }
-
-    private func statusColor(_ status: PlanStatus) -> Color {
-        switch status {
-        case .current: return .green
-        case .upcoming: return .blue
-        case .past: return .secondary
-        }
-    }
-
     private func dateRangeLabel(_ classified: ClassifiedNutritionPlan) -> String {
         let start = classified.plan.startsOn.formatted(date: .abbreviated, time: .omitted)
-        if let endsOn = classified.endsOn {
-            return "\(start) – \(endsOn.formatted(date: .abbreviated, time: .omitted))"
+        if let endsOn = classified.plan.endsOn {
+            let end = endsOn.formatted(date: .abbreviated, time: .omitted)
+            return classified.status == .scheduled ? "A partir de \(start) · até \(end)" : "\(start) – \(end)"
         }
-        return classified.status == .upcoming ? "A partir de \(start)" : "Desde \(start)"
+        return classified.status == .scheduled ? "A partir de \(start)" : "Desde \(start) · em aberto"
     }
 
     private func targetsColumn(dayType: DayType, targets: NutritionTargets) -> some View {

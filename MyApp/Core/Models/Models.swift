@@ -662,7 +662,10 @@ struct PlannedMeal: Identifiable, Codable, Equatable {
 }
 
 /// A nutritionist-style meal plan: a list of meals, each with one or more recipe-backed options.
-struct MealPlan: Identifiable, Codable, Equatable {
+/// Several can exist, each covering `startsOn` through `endsOn` (`nil` = open-ended); when more
+/// than one covers a day, the highest `priority` applies — the same rule as `NutritionPlan`, so a
+/// temporary plan (e.g. race week) can run alongside the normal one.
+struct MealPlan: Identifiable, Codable, Equatable, PrioritizedPlan {
     var id: UUID = UUID()
     var name: String
     var author: String?
@@ -670,6 +673,26 @@ struct MealPlan: Identifiable, Codable, Equatable {
     /// General guidance that isn't tied to a single meal (water, intra-workout, ...).
     var notes: String?
     var meals: [PlannedMeal]
+    var startsOn: Date = .distantPast
+    /// `nil` = open-ended.
+    var endsOn: Date?
+    var priority: Int = 1
+}
+
+extension MealPlan {
+    /// Plans saved before the schedule existed start on their prescription date (or "always").
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        author = try container.decodeIfPresent(String.self, forKey: .author)
+        prescribedAt = try container.decodeIfPresent(Date.self, forKey: .prescribedAt)
+        notes = try container.decodeIfPresent(String.self, forKey: .notes)
+        meals = try container.decode([PlannedMeal].self, forKey: .meals)
+        startsOn = try container.decodeIfPresent(Date.self, forKey: .startsOn) ?? prescribedAt ?? .distantPast
+        endsOn = try container.decodeIfPresent(Date.self, forKey: .endsOn)
+        priority = try container.decodeIfPresent(Int.self, forKey: .priority) ?? 1
+    }
 }
 
 /// A meal plan as exported/imported on its own. Self-contained: it carries every recipe the plan
@@ -750,31 +773,129 @@ struct NutritionTargets: Codable, Equatable {
     }
 }
 
-/// A nutritionist-set plan of daily targets, in effect from `startsOn` until the next plan
-/// starts. Soft-deleted (kept, flagged) rather than removed outright, so history isn't lost.
-struct NutritionPlan: Identifiable, Codable, Equatable {
+/// A nutritionist-set plan of daily targets, covering `startsOn` through `endsOn` (`nil` =
+/// open-ended, the normal case). When more than one live plan covers a day, `priority` (1–5,
+/// higher wins) decides which one applies — lets a temporary, higher-priority plan (e.g. for a
+/// race) run alongside the normal open-ended one. Soft-deleted (kept, flagged) rather than removed
+/// outright, so history isn't lost.
+struct NutritionPlan: Identifiable, Codable, Equatable, PrioritizedPlan {
     var id: UUID = UUID()
     var name: String
     var startsOn: Date
+    /// `nil` = open-ended.
+    var endsOn: Date?
+    var priority: Int = 1
     var notes: String?
     var training: NutritionTargets
     var rest: NutritionTargets
     var createdAt: Date = Date()
     var updatedAt: Date = Date()
     var deletedAt: Date?
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, startsOn, endsOn, priority, notes, training, rest, createdAt, updatedAt, deletedAt
+    }
+
+    init(
+        id: UUID = UUID(),
+        name: String,
+        startsOn: Date,
+        endsOn: Date? = nil,
+        priority: Int = 1,
+        notes: String? = nil,
+        training: NutritionTargets,
+        rest: NutritionTargets,
+        createdAt: Date = Date(),
+        updatedAt: Date = Date(),
+        deletedAt: Date? = nil
+    ) {
+        self.id = id
+        self.name = name
+        self.startsOn = startsOn
+        self.endsOn = endsOn
+        self.priority = priority
+        self.notes = notes
+        self.training = training
+        self.rest = rest
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.deletedAt = deletedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        startsOn = try container.decode(Date.self, forKey: .startsOn)
+        endsOn = try container.decodeIfPresent(Date.self, forKey: .endsOn)
+        priority = try container.decodeIfPresent(Int.self, forKey: .priority) ?? 1
+        notes = try container.decodeIfPresent(String.self, forKey: .notes)
+        training = try container.decode(NutritionTargets.self, forKey: .training)
+        rest = try container.decode(NutritionTargets.self, forKey: .rest)
+        createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
+        deletedAt = try container.decodeIfPresent(Date.self, forKey: .deletedAt)
+    }
 }
 
-/// Whether a plan is currently applied, scheduled for later, or already superseded.
+/// Whether a plan's date range covers today, is still ahead, or has already ended. Plans can
+/// overlap, so this alone doesn't say which one applies — see `inEffect`.
 enum PlanStatus {
-    case current, upcoming, past
+    case scheduled, active, ended
 }
 
-/// One plan with its computed status and the last day it applies (`nil` while open-ended).
-struct ClassifiedNutritionPlan: Identifiable {
-    var plan: NutritionPlan
+/// One plan with its computed status. `inEffect` is true for at most one plan: the active plan
+/// actually applied today (highest `priority`; ties favour the plan that started most recently).
+/// Other active plans are still shown, just overridden.
+struct ClassifiedPlan<Plan: PrioritizedPlan>: Identifiable {
+    var plan: Plan
     var status: PlanStatus
-    var endsOn: Date?
+    var inEffect: Bool
     var id: UUID { plan.id }
+}
+
+typealias ClassifiedNutritionPlan = ClassifiedPlan<NutritionPlan>
+
+/// A plan with a date range and a priority: nutrition plans (daily targets) and meal plans
+/// (meals and options). Both follow the platform's rule for which one applies on a day.
+protocol PrioritizedPlan: Identifiable where ID == UUID {
+    var startsOn: Date { get }
+    var endsOn: Date? { get }
+    var priority: Int { get }
+}
+
+extension Array where Element: PrioritizedPlan {
+    /// The plan in effect on `day`: among those whose date range covers it, the highest
+    /// `priority`, ties broken by the most recent `startsOn` — the rule the platform's
+    /// `daily_summary` uses.
+    func inEffect(on day: Date) -> Element? {
+        let calendar = Calendar.current
+        let startOfDay = calendar.startOfDay(for: day)
+        return filter { calendar.startOfDay(for: $0.startsOn) <= startOfDay
+                && ($0.endsOn.map { calendar.startOfDay(for: $0) >= startOfDay } ?? true) }
+            .sorted { a, b in a.priority != b.priority ? a.priority > b.priority : a.startsOn > b.startsOn }
+            .first
+    }
+
+    /// Every plan with its status against `today` — from its own dates only (`scheduled` hasn't
+    /// started, `ended` passed its `endsOn`, otherwise `active`) — and `inEffect` on the single
+    /// active plan that wins the priority tie-break. Ordered by start date.
+    func classifiedPlans(today: Date) -> [ClassifiedPlan<Element>] {
+        let calendar = Calendar.current
+        let startOfToday = calendar.startOfDay(for: today)
+        let winnerID = inEffect(on: today)?.id
+        return sorted { $0.startsOn < $1.startsOn }.map { plan in
+            let status: PlanStatus
+            if calendar.startOfDay(for: plan.startsOn) > startOfToday {
+                status = .scheduled
+            } else if let endsOn = plan.endsOn, calendar.startOfDay(for: endsOn) < startOfToday {
+                status = .ended
+            } else {
+                status = .active
+            }
+            return ClassifiedPlan(plan: plan, status: status, inEffect: plan.id == winnerID)
+        }
+    }
 }
 
 extension Array where Element == NutritionPlan {
@@ -783,29 +904,14 @@ extension Array where Element == NutritionPlan {
         filter { $0.deletedAt == nil }.sorted { $0.startsOn < $1.startsOn }
     }
 
-    /// The plan in effect on `day`: the most recent live plan that had already started by then.
+    /// The plan in effect on `day` (see `inEffect(on:)`), ignoring deleted plans.
     func plan(on day: Date) -> NutritionPlan? {
-        let startOfDay = Calendar.current.startOfDay(for: day)
-        return live.last { Calendar.current.startOfDay(for: $0.startsOn) <= startOfDay }
+        live.inEffect(on: day)
     }
 
-    /// Classifies every live plan against `today`: the current plan is the most recent one that
-    /// has started; later ones are upcoming; earlier ones are past. Each plan runs until the day
-    /// before the next one starts.
+    /// Every live plan with its status against `today` (see `classifiedPlans(today:)`).
     func classified(today: Date) -> [ClassifiedNutritionPlan] {
-        let calendar = Calendar.current
-        let startOfToday = calendar.startOfDay(for: today)
-        let ordered = live
-        let current = ordered.last { calendar.startOfDay(for: $0.startsOn) <= startOfToday }
-
-        return ordered.enumerated().map { index, plan in
-            let next = index + 1 < ordered.count ? ordered[index + 1] : nil
-            let status: PlanStatus = calendar.startOfDay(for: plan.startsOn) > startOfToday
-                ? .upcoming
-                : (plan.id == current?.id ? .current : .past)
-            let endsOn = next.flatMap { calendar.date(byAdding: .day, value: -1, to: $0.startsOn) }
-            return ClassifiedNutritionPlan(plan: plan, status: status, endsOn: endsOn)
-        }
+        live.classifiedPlans(today: today)
     }
 }
 
@@ -941,7 +1047,7 @@ struct BodyMeasurement: Identifiable, Codable, Equatable {
 
 /// The full contents of a CalorieBuddy database, as exported/imported via JSON.
 ///
-/// Uses a custom decoder so that databases exported before `foodItems`/`recipes`/`mealPlan`
+/// Uses a custom decoder so that databases exported before `foodItems`/`recipes`/`mealPlans`
 /// existed (version 1) still import cleanly, with those collections defaulting to empty.
 struct AppDatabase: Codable {
     static let currentVersion = 2
@@ -957,7 +1063,7 @@ struct AppDatabase: Codable {
     var supplements: [Supplement]
     var supplementLogs: [SupplementLogEntry]
     var stockLocations: [StockLocation]
-    var mealPlan: MealPlan?
+    var mealPlans: [MealPlan]
     var nutritionPlans: [NutritionPlan]
     var bodyMeasurements: [BodyMeasurement]
 
@@ -973,7 +1079,7 @@ struct AppDatabase: Codable {
         supplements: [Supplement] = [],
         supplementLogs: [SupplementLogEntry] = [],
         stockLocations: [StockLocation] = [],
-        mealPlan: MealPlan? = nil,
+        mealPlans: [MealPlan] = [],
         nutritionPlans: [NutritionPlan] = [],
         bodyMeasurements: [BodyMeasurement] = []
     ) {
@@ -988,15 +1094,20 @@ struct AppDatabase: Codable {
         self.supplements = supplements
         self.supplementLogs = supplementLogs
         self.stockLocations = stockLocations
-        self.mealPlan = mealPlan
+        self.mealPlans = mealPlans
         self.nutritionPlans = nutritionPlans
         self.bodyMeasurements = bodyMeasurements
     }
 
     private enum CodingKeys: String, CodingKey {
         case version, exportedAt, settings, entries, foodItems, recipes, stores,
-             supplementCategories, supplements, supplementLogs, stockLocations, mealPlan, nutritionPlans,
+             supplementCategories, supplements, supplementLogs, stockLocations, mealPlans, nutritionPlans,
              bodyMeasurements
+    }
+
+    /// Databases written before several meal plans existed had at most one, under `mealPlan`.
+    private enum LegacyCodingKeys: String, CodingKey {
+        case mealPlan
     }
 
     init(from decoder: Decoder) throws {
@@ -1012,7 +1123,12 @@ struct AppDatabase: Codable {
         supplements = try container.decodeIfPresent([Supplement].self, forKey: .supplements) ?? []
         supplementLogs = try container.decodeIfPresent([SupplementLogEntry].self, forKey: .supplementLogs) ?? []
         stockLocations = try container.decodeIfPresent([StockLocation].self, forKey: .stockLocations) ?? []
-        mealPlan = try container.decodeIfPresent(MealPlan.self, forKey: .mealPlan)
+        if let plans = try container.decodeIfPresent([MealPlan].self, forKey: .mealPlans) {
+            mealPlans = plans
+        } else {
+            let legacy = try decoder.container(keyedBy: LegacyCodingKeys.self)
+            mealPlans = try legacy.decodeIfPresent(MealPlan.self, forKey: .mealPlan).map { [$0] } ?? []
+        }
         nutritionPlans = try container.decodeIfPresent([NutritionPlan].self, forKey: .nutritionPlans) ?? []
         bodyMeasurements = try container.decodeIfPresent([BodyMeasurement].self, forKey: .bodyMeasurements) ?? []
     }

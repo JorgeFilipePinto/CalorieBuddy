@@ -164,7 +164,7 @@ final class PlatformSyncManager {
                 supplements: try decode(AppCollection.supplements, as: Supplement.self),
                 supplementLogs: try decode(AppCollection.supplementLogs, as: SupplementLogEntry.self),
                 stockLocations: try decode(AppCollection.stockLocations, as: StockLocation.self),
-                mealPlan: try decode(AppCollection.mealPlan, as: MealPlan.self).first,
+                mealPlans: try decode(AppCollection.mealPlan, as: MealPlan.self),
                 nutritionPlans: plans,
                 bodyMeasurements: try decode(AppCollection.bodyMeasurements, as: BodyMeasurement.self)
             )
@@ -234,6 +234,8 @@ final class PlatformSyncManager {
                         "p_id": plan.id.uuidString,
                         "p_name": plan.name,
                         "p_starts_on": Self.dayString(plan.startsOn),
+                        "p_ends_on": plan.endsOn.map(Self.dayString) ?? NSNull(),
+                        "p_priority": plan.priority,
                         "p_notes": plan.notes ?? "",
                         "p_training": Self.targetsObject(plan.training),
                         "p_rest": Self.targetsObject(plan.rest)
@@ -249,8 +251,6 @@ final class PlatformSyncManager {
                         store.applyRemoteNutritionPlans([remote])
                         state.planHashes[plan.id.uuidString] = try Self.hash(remote)
                     }
-                case "23505":
-                    warnings.append("O plano “\(plan.name)” não foi enviado: já existe outro plano na plataforma a começar em \(Self.dayString(plan.startsOn)).")
                 default:
                     warnings.append("O plano “\(plan.name)” não foi enviado: \(error.localizedDescription)")
                 }
@@ -262,7 +262,7 @@ final class PlatformSyncManager {
     private func fetchRemotePlans() async throws -> [RemotePlan] {
         try await client.select(
             "nutrition_plans", as: RemotePlan.self,
-            select: "id,name,starts_on,notes,created_at,updated_at,deleted_at,nutrition_targets(day_type,kcal,protein_g,carbs_g,fat_g,water_ml)",
+            select: "id,name,starts_on,ends_on,priority,notes,created_at,updated_at,deleted_at,nutrition_targets(day_type,kcal,protein_g,carbs_g,fat_g,water_ml)",
             order: "starts_on,id"
         )
     }
@@ -270,6 +270,7 @@ final class PlatformSyncManager {
     /// Same plan as far as the user is concerned (timestamps aside).
     private static func sameContent(_ a: NutritionPlan, _ b: NutritionPlan) -> Bool {
         a.name == b.name && dayString(a.startsOn) == dayString(b.startsOn)
+            && a.endsOn.map(dayString) == b.endsOn.map(dayString) && a.priority == b.priority
             && (a.notes ?? "").trimmingCharacters(in: .whitespacesAndNewlines) == (b.notes ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             && a.training == b.training && a.rest == b.rest && (a.deletedAt == nil) == (b.deletedAt == nil)
     }
@@ -509,6 +510,8 @@ private struct RemotePlan: Decodable {
     let id: UUID
     let name: String
     let starts_on: String
+    let ends_on: String?
+    let priority: Int
     let notes: String?
     let created_at: String
     let updated_at: String
@@ -524,6 +527,8 @@ private struct RemotePlan: Decodable {
             id: id,
             name: name,
             startsOn: startsOn,
+            endsOn: ends_on.flatMap(PlatformSyncManager.dayFormatter.date(from:)),
+            priority: priority,
             notes: notes,
             training: training.targets,
             rest: rest.targets,
@@ -573,7 +578,9 @@ private struct AppCollection {
             AppCollection(supplementLogs, database.supplementLogs),
             AppCollection(stockLocations, database.stockLocations),
             AppCollection(bodyMeasurements, database.bodyMeasurements),
-            AppCollection(name: mealPlan, documents: database.mealPlan.map { [("current", $0)] } ?? []),
+            // One document per plan, by id. (A single plan used to be stored under id "current";
+            // the first sync after the update soft-deletes that one.)
+            AppCollection(mealPlan, database.mealPlans),
             AppCollection(name: settings, documents: [("current", database.settings)])
         ]
     }

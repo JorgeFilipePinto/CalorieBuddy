@@ -1,69 +1,54 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// Shows the meal plan: every meal with its macro targets and its options, each linked to a
-/// recipe that can be logged straight into the daily log. The plan can be exported and imported
-/// on its own, as a self-contained JSON file.
+/// Every meal plan, the one in effect today first: several can exist, each with its own dates
+/// and priority (the highest-priority plan covering a day applies — same rule as the nutrition
+/// plans). Each plan and each of its meals is collapsible; a meal's options are linked to recipes
+/// that can be logged straight into the daily log. Plans export/import as self-contained JSON.
 struct MealPlanView: View {
     @Environment(DataStore.self) private var store
 
     @State private var optionToLog: PlanOptionSelection?
     @State private var optionToLink: PlanOptionSelection?
     @State private var recipeToEdit: Recipe?
+    @State private var planToSchedule: MealPlan?
+
+    @State private var expandedPlans: Set<UUID> = []
+    @State private var expandedMeals: Set<UUID> = []
+    @State private var didSetInitialExpansion = false
 
     @State private var exportURL: URL?
     @State private var showExportMover = false
     @State private var isImporting = false
-    @State private var pendingImportURL: URL?
-    @State private var showImportConfirmation = false
-    @State private var showDeleteConfirmation = false
+    @State private var pendingImport: MealPlanFile?
+    @State private var planToDelete: MealPlan?
     @State private var errorMessage: String?
+
+    /// In effect today first, then other active plans by priority, then scheduled (soonest
+    /// first), then ended (most recent first).
+    private var orderedPlans: [ClassifiedPlan<MealPlan>] {
+        let classified = store.mealPlans.classifiedPlans(today: .now)
+        func rank(_ c: ClassifiedPlan<MealPlan>) -> Int {
+            if c.inEffect { return 0 }
+            switch c.status {
+            case .active: return 1
+            case .scheduled: return 2
+            case .ended: return 3
+            }
+        }
+        return classified.sorted { a, b in
+            if rank(a) != rank(b) { return rank(a) < rank(b) }
+            switch a.status {
+            case .active: return a.plan.priority != b.plan.priority ? a.plan.priority > b.plan.priority : a.plan.startsOn > b.plan.startsOn
+            case .scheduled: return a.plan.startsOn < b.plan.startsOn
+            case .ended: return a.plan.startsOn > b.plan.startsOn
+            }
+        }
+    }
 
     var body: some View {
         List {
-            if let plan = store.mealPlan {
-                Section {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(plan.name)
-                            .font(.title3.bold())
-                        if let author = plan.author {
-                            Text(author)
-                                .foregroundStyle(.secondary)
-                        }
-                        if let prescribedAt = plan.prescribedAt {
-                            Text("Prescrito em \(prescribedAt.formatted(date: .abbreviated, time: .omitted))")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    if let notes = plan.notes, !notes.isEmpty {
-                        Label(notes, systemImage: "info.circle")
-                            .font(.subheadline)
-                    }
-                }
-
-                Section {
-                    MealPlanSummaryView(plan: plan)
-                } header: {
-                    Text("Resumo Diário")
-                } footer: {
-                    Text("Soma dos alvos de cada refeição. Calorias estimadas a partir dos macros (4 kcal/g de proteína e hidratos, 9 kcal/g de gordura).")
-                }
-
-                ForEach(plan.meals) { meal in
-                    Section {
-                        ForEach(meal.options) { option in
-                            optionRow(option, in: meal)
-                        }
-                    } header: {
-                        MealPlanMealHeader(meal: meal)
-                    } footer: {
-                        if let notes = meal.notes, !notes.isEmpty {
-                            Text(notes)
-                        }
-                    }
-                }
-            } else {
+            if store.mealPlans.isEmpty {
                 ContentUnavailableView {
                     Label("Sem Plano Alimentar", systemImage: "list.clipboard")
                 } description: {
@@ -71,36 +56,25 @@ struct MealPlanView: View {
                 } actions: {
                     Button("Importar Plano") { isImporting = true }
                 }
+            } else {
+                ForEach(orderedPlans) { classified in
+                    planSection(classified)
+                }
             }
         }
         .navigationTitle("Plano Alimentar")
         .trackScreen("Plano Alimentar")
+        .onAppear(perform: setInitialExpansion)
         .refreshable {
             Haptics.light()
             store.reloadFromDisk()
         }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                Menu {
-                    Button {
-                        exportPlan()
-                    } label: {
-                        Label("Exportar Plano", systemImage: "square.and.arrow.down")
-                    }
-                    .disabled(store.mealPlan == nil)
-                    Button {
-                        isImporting = true
-                    } label: {
-                        Label("Importar Plano", systemImage: "square.and.arrow.up")
-                    }
-                    Button(role: .destructive) {
-                        showDeleteConfirmation = true
-                    } label: {
-                        Label("Eliminar Plano", systemImage: "trash")
-                    }
-                    .disabled(store.mealPlan == nil)
+                Button {
+                    isImporting = true
                 } label: {
-                    Image(systemName: "ellipsis.circle")
+                    Label("Importar Plano", systemImage: "square.and.arrow.down")
                 }
             }
         }
@@ -118,11 +92,14 @@ struct MealPlanView: View {
         }
         .sheet(item: $optionToLink) { selection in
             RecipeLinkPickerView(currentRecipeID: selection.option.recipeID) { recipeID in
-                store.linkMealPlanOption(selection.option.id, inMeal: selection.meal.id, toRecipe: recipeID)
+                store.linkMealPlanOption(selection.option.id, inMeal: selection.meal.id, ofPlan: selection.planID, toRecipe: recipeID)
             }
         }
         .sheet(item: $recipeToEdit) { recipe in
             RecipeEditorView(recipeToEdit: recipe)
+        }
+        .sheet(item: $planToSchedule) { plan in
+            MealPlanScheduleEditorView(plan: plan)
         }
         .fileMover(isPresented: $showExportMover, file: exportURL) { result in
             if case .failure(let error) = result {
@@ -132,11 +109,15 @@ struct MealPlanView: View {
         .fileImporter(isPresented: $isImporting, allowedContentTypes: [.json]) { result in
             switch result {
             case .success(let url):
-                pendingImportURL = url
-                if store.mealPlan == nil {
-                    performImport()
-                } else {
-                    showImportConfirmation = true
+                do {
+                    let file = try store.readMealPlanFile(at: url)
+                    if store.mealPlans.contains(where: { $0.id == file.plan.id }) {
+                        pendingImport = file
+                    } else {
+                        performImport(file)
+                    }
+                } catch {
+                    errorMessage = error.localizedDescription
                 }
             case .failure(let error):
                 errorMessage = error.localizedDescription
@@ -144,22 +125,24 @@ struct MealPlanView: View {
         }
         .confirmationDialog(
             "Substituir o plano alimentar?",
-            isPresented: $showImportConfirmation,
-            titleVisibility: .visible
-        ) {
-            Button("Importar e Substituir", role: .destructive) { performImport() }
-            Button("Cancelar", role: .cancel) { pendingImportURL = nil }
-        } message: {
-            Text("O plano atual é substituído pelo importado. As receitas e alimentos do ficheiro são adicionados ao catálogo; os que já existem mantêm-se como estão.")
+            isPresented: Binding(get: { pendingImport != nil }, set: { if !$0 { pendingImport = nil } }),
+            titleVisibility: .visible,
+            presenting: pendingImport
+        ) { file in
+            Button("Importar e Substituir", role: .destructive) { performImport(file) }
+            Button("Cancelar", role: .cancel) { pendingImport = nil }
+        } message: { file in
+            Text("Já existe o plano “\(file.plan.name)”. É substituído pelo importado. As receitas e alimentos do ficheiro são adicionados ao catálogo; os que já existem mantêm-se como estão.")
         }
         .confirmationDialog(
             "Eliminar o plano alimentar?",
-            isPresented: $showDeleteConfirmation,
-            titleVisibility: .visible
-        ) {
-            Button("Eliminar Plano", role: .destructive) { store.deleteMealPlan() }
+            isPresented: Binding(get: { planToDelete != nil }, set: { if !$0 { planToDelete = nil } }),
+            titleVisibility: .visible,
+            presenting: planToDelete
+        ) { plan in
+            Button("Eliminar “\(plan.name)”", role: .destructive) { store.deleteMealPlan(plan) }
             Button("Cancelar", role: .cancel) {}
-        } message: {
+        } message: { _ in
             Text("As receitas e os alimentos do plano continuam no catálogo.")
         }
         .alert(
@@ -175,8 +158,136 @@ struct MealPlanView: View {
         }
     }
 
-    private func optionRow(_ option: MealPlanOption, in meal: PlannedMeal) -> some View {
-        let selection = PlanOptionSelection(meal: meal, option: option)
+    // MARK: Plan
+
+    private func planSection(_ classified: ClassifiedPlan<MealPlan>) -> some View {
+        let plan = classified.plan
+        let isExpanded = expandedPlans.contains(plan.id)
+        return Section {
+            HStack(alignment: .top) {
+                Button {
+                    withAnimation { toggle(plan.id, in: &expandedPlans) }
+                } label: {
+                    HStack(alignment: .top) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(plan.name)
+                                .font(.title3.bold())
+                                .foregroundStyle(.primary)
+                            HStack(spacing: 6) {
+                                PlanStatusBadge(status: classified.status, inEffect: classified.inEffect)
+                                if plan.priority > 1 {
+                                    PlanPriorityBadge(priority: plan.priority)
+                                }
+                            }
+                            Text(Self.dateRange(plan, status: classified.status))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                            .padding(.top, 6)
+                    }
+                    .contentShape(Rectangle())
+                }
+                // Plain, not borderless: borderless would tint the whole title in the accent red.
+                .buttonStyle(.plain)
+
+                Menu {
+                    Button {
+                        planToSchedule = plan
+                    } label: {
+                        Label("Datas e Prioridade", systemImage: "calendar")
+                    }
+                    Button {
+                        export(plan)
+                    } label: {
+                        Label("Exportar Plano", systemImage: "square.and.arrow.up")
+                    }
+                    Button(role: .destructive) {
+                        planToDelete = plan
+                    } label: {
+                        Label("Eliminar Plano", systemImage: "trash")
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .font(.title3)
+                        .padding(.leading, 8)
+                }
+                .buttonStyle(.borderless)
+            }
+
+            if isExpanded {
+                if plan.author != nil || plan.prescribedAt != nil || !(plan.notes ?? "").isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        if let author = plan.author {
+                            Text(author)
+                                .foregroundStyle(.secondary)
+                        }
+                        if let prescribedAt = plan.prescribedAt {
+                            Text("Prescrito em \(prescribedAt.formatted(date: .abbreviated, time: .omitted))")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        if let notes = plan.notes, !notes.isEmpty {
+                            Label(notes, systemImage: "info.circle")
+                                .font(.subheadline)
+                        }
+                    }
+                }
+
+                DisclosureGroup {
+                    MealPlanSummaryView(plan: plan)
+                } label: {
+                    Label("Resumo Diário", systemImage: "chart.pie")
+                }
+
+                ForEach(plan.meals) { meal in
+                    DisclosureGroup(isExpanded: binding(for: meal.id, in: $expandedMeals)) {
+                        ForEach(meal.options) { option in
+                            optionRow(option, in: meal, of: plan)
+                        }
+                        if let notes = meal.notes, !notes.isEmpty {
+                            Text(notes)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    } label: {
+                        MealPlanMealLabel(meal: meal)
+                    }
+                }
+            }
+        } header: {
+            Text(Self.sectionTitle(classified))
+        }
+    }
+
+    private static func sectionTitle(_ classified: ClassifiedPlan<MealPlan>) -> String {
+        if classified.inEffect { return "Em vigor hoje" }
+        switch classified.status {
+        case .active: return "Ativo, substituído"
+        case .scheduled: return "Agendado"
+        case .ended: return "Terminado"
+        }
+    }
+
+    static func dateRange(_ plan: MealPlan, status: PlanStatus) -> String {
+        let hasStart = plan.startsOn > .distantPast
+        let start = plan.startsOn.formatted(date: .abbreviated, time: .omitted)
+        switch (hasStart, plan.endsOn) {
+        case (true, let end?): return "\(start) – \(end.formatted(date: .abbreviated, time: .omitted))"
+        case (false, let end?): return "Até \(end.formatted(date: .abbreviated, time: .omitted))"
+        case (true, nil): return status == .scheduled ? "A partir de \(start)" : "Desde \(start) · em aberto"
+        case (false, nil): return "Sem datas · em aberto"
+        }
+    }
+
+    // MARK: Options
+
+    private func optionRow(_ option: MealPlanOption, in meal: PlannedMeal, of plan: MealPlan) -> some View {
+        let selection = PlanOptionSelection(planID: plan.id, meal: meal, option: option)
         let recipe = option.recipeID.flatMap(store.recipe(withID:))
         return Button {
             if recipe == nil {
@@ -221,9 +332,38 @@ struct MealPlanView: View {
         }
     }
 
-    private func exportPlan() {
+    // MARK: Expansion
+
+    /// Opens the plan in effect today, and in it the meal for the current time of day.
+    private func setInitialExpansion() {
+        guard !didSetInitialExpansion else { return }
+        didSetInitialExpansion = true
+        guard let current = store.mealPlan(on: .now) else { return }
+        expandedPlans.insert(current.id)
+        let mealType = MealType.suggested(for: .now)
+        if let meal = current.meals.first(where: { $0.mealType == mealType }) {
+            expandedMeals.insert(meal.id)
+        }
+    }
+
+    private func toggle(_ id: UUID, in set: inout Set<UUID>) {
+        if set.contains(id) { set.remove(id) } else { set.insert(id) }
+    }
+
+    private func binding(for id: UUID, in set: Binding<Set<UUID>>) -> Binding<Bool> {
+        Binding(
+            get: { set.wrappedValue.contains(id) },
+            set: { isOpen in
+                if isOpen { set.wrappedValue.insert(id) } else { set.wrappedValue.remove(id) }
+            }
+        )
+    }
+
+    // MARK: Import / export
+
+    private func export(_ plan: MealPlan) {
         do {
-            exportURL = try store.exportMealPlanURL()
+            exportURL = try store.exportMealPlanURL(plan)
             showExportMover = true
             AppAnalytics.log(.mealPlanExported)
         } catch {
@@ -231,20 +371,176 @@ struct MealPlanView: View {
         }
     }
 
-    private func performImport() {
-        guard let url = pendingImportURL else { return }
-        do {
-            try store.importMealPlan(from: url)
-            AppAnalytics.log(.mealPlanImported)
-        } catch {
-            errorMessage = error.localizedDescription
+    /// Imports the plan and opens its dates/priority right away, so a new plan gets scheduled
+    /// alongside the existing ones instead of silently overriding (or being overridden by) them.
+    private func performImport(_ file: MealPlanFile) {
+        let isNew = !store.mealPlans.contains(where: { $0.id == file.plan.id })
+        store.importMealPlan(file)
+        AppAnalytics.log(.mealPlanImported)
+        pendingImport = nil
+        expandedPlans.insert(file.plan.id)
+        if isNew, let imported = store.mealPlans.first(where: { $0.id == file.plan.id }) {
+            planToSchedule = imported
         }
-        pendingImportURL = nil
+    }
+}
+
+/// "Em Vigor" / "Ativo, Substituído" / "Agendado" / "Terminado", as a small coloured capsule.
+struct PlanStatusBadge: View {
+    let status: PlanStatus
+    let inEffect: Bool
+
+    var body: some View {
+        let (label, color): (String, Color) = {
+            switch status {
+            case .active: return inEffect ? ("Em Vigor", .green) : ("Ativo, Substituído", .secondary)
+            case .scheduled: return ("Agendado", .blue)
+            case .ended: return ("Terminado", .secondary)
+            }
+        }()
+        Text(label)
+            .font(.caption2.weight(.semibold))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 2)
+            .background(color.opacity(0.15), in: Capsule())
+            .foregroundStyle(color)
+    }
+}
+
+struct PlanPriorityBadge: View {
+    let priority: Int
+
+    var body: some View {
+        Text("Prioridade \(priority)")
+            .font(.caption2)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 2)
+            .overlay(Capsule().stroke(.secondary.opacity(0.4)))
+            .foregroundStyle(.secondary)
+    }
+}
+
+/// A meal's collapsed row: name and icon, how many options, and its macro targets.
+struct MealPlanMealLabel: View {
+    let meal: PlannedMeal
+
+    var body: some View {
+        HStack {
+            Label {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(meal.name)
+                        .font(.headline)
+                    Text("\(meal.options.count) \(meal.options.count == 1 ? "opção" : "opções")")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } icon: {
+                Image(systemName: meal.mealType.symbolName)
+            }
+            Spacer()
+            if let targets = MacroFormat.targets(meal) {
+                Text(targets)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+        }
+    }
+}
+
+/// Edits a meal plan's name, start/end dates and priority — the same fields and rules as a
+/// nutrition plan's schedule.
+struct MealPlanScheduleEditorView: View {
+    @Environment(DataStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+
+    let plan: MealPlan
+
+    @State private var name = ""
+    @State private var hasStart = true
+    @State private var startsOn = Date()
+    @State private var isTemporary = false
+    @State private var endsOn = Date()
+    @State private var priority = 1
+
+    private var trimmedName: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    private var isValid: Bool {
+        !trimmedName.isEmpty
+            && (!isTemporary || !hasStart || Calendar.current.startOfDay(for: endsOn) >= Calendar.current.startOfDay(for: startsOn))
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("Nome", text: $name)
+                }
+                Section {
+                    Toggle("Data de Início", isOn: $hasStart.animation())
+                    if hasStart {
+                        DatePicker("Início", selection: $startsOn, displayedComponents: .date)
+                    }
+                    Toggle("Plano Temporário", isOn: $isTemporary.animation())
+                    if isTemporary {
+                        DatePicker("Fim", selection: $endsOn, in: (hasStart ? startsOn : .distantPast)..., displayedComponents: .date)
+                    }
+                    Picker("Prioridade", selection: $priority) {
+                        ForEach(1...5, id: \.self) { level in
+                            Text(level == 1 ? "1 — plano normal" : level == 5 ? "5 — máxima" : "\(level)").tag(level)
+                        }
+                    }
+                } header: {
+                    Text("Vigência")
+                } footer: {
+                    Text("Sem data de início, o plano aplica-se desde sempre; sem data de fim, fica em aberto. Quando mais do que um plano alimentar cobre o mesmo dia, aplica-se o de prioridade mais alta (em empate, o que começou mais recentemente) — é esse que aparece em \"Do Plano Alimentar\" no registo do dia.")
+                }
+            }
+            .navigationTitle("Datas e Prioridade")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .onAppear(perform: populate)
+            .onChange(of: startsOn) {
+                if endsOn < startsOn { endsOn = startsOn }
+            }
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancelar") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Guardar") { save() }
+                        .disabled(!isValid)
+                }
+            }
+        }
+    }
+
+    private func populate() {
+        name = plan.name
+        hasStart = plan.startsOn > .distantPast
+        startsOn = hasStart ? plan.startsOn : Calendar.current.startOfDay(for: .now)
+        isTemporary = plan.endsOn != nil
+        endsOn = plan.endsOn ?? startsOn
+        priority = plan.priority
+    }
+
+    private func save() {
+        let calendar = Calendar.current
+        store.updateMealPlanSchedule(
+            plan.id,
+            name: trimmedName,
+            startsOn: hasStart ? calendar.startOfDay(for: startsOn) : .distantPast,
+            endsOn: isTemporary ? calendar.startOfDay(for: endsOn) : nil,
+            priority: priority
+        )
+        dismiss()
     }
 }
 
 /// A meal and one of its options, as a single identifiable value for sheets.
 struct PlanOptionSelection: Identifiable {
+    var planID: UUID
     var meal: PlannedMeal
     var option: MealPlanOption
     var id: UUID { option.id }
@@ -706,7 +1002,8 @@ struct MealPlanSummaryView: View {
     }
 }
 
-/// Quick-log sheet from the daily log: pick an option of the meal plan and log its recipe.
+/// Quick-log sheet from the daily log: pick an option of the meal plan in effect on `date` and
+/// log its recipe.
 struct MealPlanPickerView: View {
     @Environment(DataStore.self) private var store
     @Environment(\.dismiss) private var dismiss
@@ -716,7 +1013,15 @@ struct MealPlanPickerView: View {
     var body: some View {
         NavigationStack {
             List {
-                if let plan = store.mealPlan {
+                if let plan = store.mealPlan(on: date) {
+                    Section {
+                        Text(plan.name)
+                            .font(.headline)
+                    } footer: {
+                        if store.mealPlans.count > 1 {
+                            Text("O plano alimentar em vigor neste dia (o de prioridade mais alta).")
+                        }
+                    }
                     ForEach(plan.meals) { meal in
                         Section {
                             ForEach(meal.options) { option in
@@ -734,9 +1039,11 @@ struct MealPlanPickerView: View {
                     }
                 } else {
                     ContentUnavailableView(
-                        "Sem Plano Alimentar",
+                        store.mealPlans.isEmpty ? "Sem Plano Alimentar" : "Nenhum Plano em Vigor",
                         systemImage: "list.clipboard",
-                        description: Text("Importa um plano em Alimentos › Plano Alimentar.")
+                        description: Text(store.mealPlans.isEmpty
+                            ? "Importa um plano em Alimentos › Plano Alimentar."
+                            : "Nenhum plano alimentar cobre este dia. Ajusta as datas em Alimentos › Plano Alimentar.")
                     )
                 }
             }
