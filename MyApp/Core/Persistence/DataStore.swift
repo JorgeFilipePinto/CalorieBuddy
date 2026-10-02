@@ -37,6 +37,7 @@ final class DataStore {
     private(set) var mealPlans: [MealPlan] = []
     private(set) var nutritionPlans: [NutritionPlan] = []
     private(set) var bodyMeasurements: [BodyMeasurement] = []
+    private(set) var progressPhotos: [ProgressPhoto] = []
     var settings: UserSettings = .default
 
     private(set) var backupTimestamp: Date?
@@ -69,6 +70,27 @@ final class DataStore {
         loadActive()
         refreshBackupTimestamp()
         seedExampleDataIfNeeded()
+        removeOrphanPhotos()
+    }
+
+    /// Deletes photo files no record points at — neither in the active database nor in the
+    /// backup (so "Restaurar Backup" still finds its photos). Done once at launch rather than on
+    /// every delete; it also clears photos taken in an editor that was then cancelled.
+    private func removeOrphanPhotos() {
+        var referenced = Self.photoIDs(in: currentDatabase())
+        if let data = try? Data(contentsOf: backupURL), let backup = try? decoder.decode(AppDatabase.self, from: data) {
+            referenced.formUnion(Self.photoIDs(in: backup))
+        }
+        for id in PhotoStore.storedIDs().subtracting(referenced) {
+            PhotoStore.delete(id)
+        }
+    }
+
+    private static func photoIDs(in database: AppDatabase) -> Set<UUID> {
+        Set(database.foodItems.compactMap(\.photoID)
+            + database.recipes.compactMap(\.photoID)
+            + database.supplements.compactMap(\.photoID)
+            + database.progressPhotos.map(\.photoID))
     }
 
     /// Seeds one example recipe and its ingredients on the very first launch, as a guide for
@@ -380,6 +402,23 @@ final class DataStore {
     /// Every value of `metric`, most recent first.
     func bodyMeasurements(of metric: BodyMetric) -> [BodyMeasurement] {
         bodyMeasurements.filter { $0.metric == metric }.sorted { $0.date > $1.date }
+    }
+
+    // MARK: - Progress photos
+
+    /// Every progress photo, most recent first.
+    var progressPhotosByDate: [ProgressPhoto] {
+        progressPhotos.sorted { $0.date > $1.date }
+    }
+
+    func addProgressPhotos(_ photos: [ProgressPhoto]) {
+        progressPhotos.append(contentsOf: photos)
+        persistActive()
+    }
+
+    func deleteProgressPhoto(_ photo: ProgressPhoto) {
+        progressPhotos.removeAll { $0.id == photo.id }
+        persistActive()
     }
 
     func addBodyMeasurements(_ measurements: [BodyMeasurement]) {
@@ -836,6 +875,7 @@ final class DataStore {
         mealPlans = database.mealPlans
         nutritionPlans = database.nutritionPlans
         bodyMeasurements = database.bodyMeasurements
+        progressPhotos = database.progressPhotos
     }
 
     /// Re-reads the active database file from disk and updates in-memory state to match it.
@@ -863,7 +903,8 @@ final class DataStore {
             stockLocations: stockLocations,
             mealPlans: mealPlans,
             nutritionPlans: nutritionPlans,
-            bodyMeasurements: bodyMeasurements
+            bodyMeasurements: bodyMeasurements,
+            progressPhotos: progressPhotos
         )
     }
 
@@ -984,6 +1025,7 @@ final class DataStore {
         mealPlans = database.mealPlans
         nutritionPlans = database.nutritionPlans
         bodyMeasurements = database.bodyMeasurements
+        progressPhotos = database.progressPhotos
         persistActive()
         refreshBackupTimestamp()
     }
@@ -1023,6 +1065,7 @@ final class DataStore {
         mealPlans = restoredDatabase.mealPlans
         nutritionPlans = restoredDatabase.nutritionPlans
         bodyMeasurements = restoredDatabase.bodyMeasurements
+        progressPhotos = restoredDatabase.progressPhotos
         persistActive()
         refreshBackupTimestamp()
     }
@@ -1043,8 +1086,10 @@ final class DataStore {
         mealPlans = []
         nutritionPlans = []
         bodyMeasurements = []
+        progressPhotos = []
         settings = .default
         try? fileManager.removeItem(at: backupURL)
+        PhotoStore.deleteAll()
         backupTimestamp = nil
         persistActive()
     }

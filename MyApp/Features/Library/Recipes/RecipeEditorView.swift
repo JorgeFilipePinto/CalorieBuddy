@@ -7,6 +7,7 @@ struct RecipeEditorView: View {
     let recipeToEdit: Recipe?
 
     @State private var name = ""
+    @State private var photoID: UUID?
     @State private var items: [RecipeItem] = []
     @State private var showingAddComponent = false
     @State private var showingJSONImport = false
@@ -39,6 +40,12 @@ struct RecipeEditorView: View {
     var body: some View {
         NavigationStack {
             Form {
+                #if canImport(UIKit)
+                Section("Foto") {
+                    PhotoPickerField(photoID: $photoID)
+                }
+                #endif
+
                 Section("Receita") {
                     TextField("Nome da receita", text: $name)
                 }
@@ -127,6 +134,7 @@ struct RecipeEditorView: View {
         guard let recipe = recipeToEdit else { return }
         name = recipe.name
         items = recipe.items
+        photoID = recipe.photoID
     }
 
     private func handleJSONImport(_ json: String) throws {
@@ -143,7 +151,8 @@ struct RecipeEditorView: View {
             name: name.trimmingCharacters(in: .whitespaces),
             items: items,
             isFavorite: recipeToEdit?.isFavorite ?? false,
-            createdAt: recipeToEdit?.createdAt ?? Date()
+            createdAt: recipeToEdit?.createdAt ?? Date(),
+            photoID: photoID
         )
         if recipeToEdit == nil {
             store.addRecipe(recipe)

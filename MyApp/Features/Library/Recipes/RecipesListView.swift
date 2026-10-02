@@ -144,6 +144,7 @@ struct RecipesListView: View {
             recipeToEdit = recipe
         } label: {
             HStack {
+                PhotoThumbnail(photoID: recipe.photoID, placeholder: "fork.knife")
                 VStack(alignment: .leading) {
                     HStack(spacing: 4) {
                         Text(recipe.name)

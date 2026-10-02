@@ -8,6 +8,7 @@ struct HealthSectionView: View {
 
     @State private var showingLogWeight = false
     @State private var showingLogMeasurements = false
+    @State private var showingLogProgressPhotos = false
 
     /// A year of Apple Health data, so the monthly weight history has something to group.
     private static let historyDays = 365
@@ -31,6 +32,7 @@ struct HealthSectionView: View {
                     BodyCompositionSections(part: .composition)
                     BodyCompositionSections(part: .circumferences)
                     BodyMeasurementLogCard(showingLog: $showingLogMeasurements)
+                    ProgressPhotosSection(showingLog: $showingLogProgressPhotos)
                     historySection
                 }
             } else {
@@ -56,6 +58,9 @@ struct HealthSectionView: View {
         }
         .sheet(isPresented: $showingLogMeasurements) {
             LogBodyMeasurementsView()
+        }
+        .sheet(isPresented: $showingLogProgressPhotos) {
+            LogProgressPhotosView()
         }
     }
 

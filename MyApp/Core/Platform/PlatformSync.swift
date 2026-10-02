@@ -166,7 +166,8 @@ final class PlatformSyncManager {
                 stockLocations: try decode(AppCollection.stockLocations, as: StockLocation.self),
                 mealPlans: try decode(AppCollection.mealPlan, as: MealPlan.self),
                 nutritionPlans: plans,
-                bodyMeasurements: try decode(AppCollection.bodyMeasurements, as: BodyMeasurement.self)
+                bodyMeasurements: try decode(AppCollection.bodyMeasurements, as: BodyMeasurement.self),
+                progressPhotos: try decode(AppCollection.progressPhotos, as: ProgressPhoto.self)
             )
             store.replaceDatabase(with: database)
 
@@ -553,6 +554,7 @@ private struct AppCollection {
     static let mealPlan = "mealPlan"
     static let settings = "settings"
     static let bodyMeasurements = "bodyMeasurements"
+    static let progressPhotos = "progressPhotos"
 
     let name: String
     let documents: [(id: String, value: any Encodable)]
@@ -578,6 +580,9 @@ private struct AppCollection {
             AppCollection(supplementLogs, database.supplementLogs),
             AppCollection(stockLocations, database.stockLocations),
             AppCollection(bodyMeasurements, database.bodyMeasurements),
+            // Only the metadata (date, pose, photo id): the images themselves aren't uploaded yet —
+            // see `.claude/notes/photos-api-dashboard.md` (Supabase Storage bucket).
+            AppCollection(progressPhotos, database.progressPhotos),
             // One document per plan, by id. (A single plan used to be stored under id "current";
             // the first sync after the update soft-deletes that one.)
             AppCollection(mealPlan, database.mealPlans),

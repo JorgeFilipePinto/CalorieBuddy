@@ -41,7 +41,7 @@ struct DataManagementView: View {
                 Text("Exportar")
             } footer: {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Guarda uma cópia num ficheiro — não altera nada na app. O ficheiro inclui tudo: registos diários, catálogo de alimentos, receitas, plano alimentar, suplementos, categorias, stocks, lojas, preços e definições.")
+                    Text("Guarda uma cópia num ficheiro — não altera nada na app. O ficheiro inclui tudo: registos diários, catálogo de alimentos, receitas, plano alimentar, suplementos, categorias, stocks, lojas, preços e definições. As fotos (de alimentos, receitas, suplementos e evolução física) não vão no ficheiro: ficam guardadas à parte, no telemóvel.")
                     if let backupTimestamp = store.backupTimestamp {
                         Text("Último backup: \(backupTimestamp.formatted(date: .abbreviated, time: .shortened))")
                     } else {

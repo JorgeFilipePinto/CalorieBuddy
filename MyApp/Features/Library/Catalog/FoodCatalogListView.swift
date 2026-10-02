@@ -126,6 +126,7 @@ struct FoodCatalogListView: View {
             foodItemToEdit = item
         } label: {
             HStack {
+                PhotoThumbnail(photoID: item.photoID, placeholder: "carrot")
                 VStack(alignment: .leading) {
                     HStack(spacing: 4) {
                         Text(item.brand.map { "\(item.name) (\($0))" } ?? item.name)

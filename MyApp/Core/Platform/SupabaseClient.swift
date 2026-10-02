@@ -78,6 +78,10 @@ final class SupabaseClient {
         let configuration = URLSessionConfiguration.default
         configuration.timeoutIntervalForRequest = 60
         configuration.waitsForConnectivity = false
+        // Every answer must be live data: without this, GETs whose response has no Cache-Control
+        // (Edge Functions) are served from the heuristic HTTP cache and look stale.
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.urlCache = nil
         return URLSession(configuration: configuration)
     }()
 
@@ -239,6 +243,12 @@ final class SupabaseClient {
     @discardableResult
     func rpc(_ name: String, object: [String: Any]) async throws -> Data {
         try await send("POST", "/rest/v1/rpc/\(name)", body: JSONSerialization.data(withJSONObject: object))
+    }
+
+    /// Calls an Edge Function as the signed-in user (e.g. `invite-user`, which holds the secret
+    /// key server-side so the app never needs it). Functions answer errors as `{ message }`.
+    func callFunction(_ name: String, method: String, object: [String: Any]? = nil) async throws -> Data {
+        try await send(method, "/functions/v1/\(name)", body: object.map { try JSONSerialization.data(withJSONObject: $0) })
     }
 
     // MARK: Transport

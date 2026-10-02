@@ -15,6 +15,7 @@ struct SupplementEditorView: View {
     }
 
     @State private var name = ""
+    @State private var photoID: UUID?
     @State private var categoryID: UUID?
     @State private var showingCategoryPicker = false
 
@@ -77,6 +78,12 @@ struct SupplementEditorView: View {
     var body: some View {
         NavigationStack {
             Form {
+                #if canImport(UIKit)
+                Section("Foto") {
+                    PhotoPickerField(photoID: $photoID)
+                }
+                #endif
+
                 Section("Suplemento") {
                     TextField("Nome", text: $name)
                     Button {
@@ -303,6 +310,7 @@ struct SupplementEditorView: View {
 
     private func populateIfEditing() {
         guard let supplement = supplementToEdit else { return }
+        photoID = supplement.photoID
         name = supplement.name
         categoryID = supplement.categoryID
         unit = supplement.unit
@@ -357,7 +365,8 @@ struct SupplementEditorView: View {
             stocks: stocks.filter { store.stockLocation(withID: $0.locationID) != nil },
             lowStockThreshold: Double(lowStockThresholdText.replacingOccurrences(of: ",", with: ".")),
             isFavorite: supplementToEdit?.isFavorite ?? false,
-            createdAt: supplementToEdit?.createdAt ?? Date()
+            createdAt: supplementToEdit?.createdAt ?? Date(),
+            photoID: photoID
         )
         if supplementToEdit == nil {
             store.addSupplement(supplement)

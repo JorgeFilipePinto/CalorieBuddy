@@ -278,6 +278,8 @@ struct FoodItem: Identifiable, Codable, Hashable, Doseable, Favoritable {
     var prices: [PriceEntry]
     var isFavorite: Bool
     var createdAt: Date
+    /// The item's photo in `PhotoStore` (`nil` = none).
+    var photoID: UUID?
 
     init(
         id: UUID = UUID(),
@@ -295,7 +297,8 @@ struct FoodItem: Identifiable, Codable, Hashable, Doseable, Favoritable {
         barcodes: [String] = [],
         prices: [PriceEntry] = [],
         isFavorite: Bool = false,
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        photoID: UUID? = nil
     ) {
         self.id = id
         self.name = name
@@ -313,11 +316,12 @@ struct FoodItem: Identifiable, Codable, Hashable, Doseable, Favoritable {
         self.prices = prices
         self.isFavorite = isFavorite
         self.createdAt = createdAt
+        self.photoID = photoID
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, name, brand, unit, doseSize, nutritionBasis, calories, protein, carbs, fat,
-             minerals, vitamins, barcodes, prices, isFavorite, createdAt
+             minerals, vitamins, barcodes, prices, isFavorite, createdAt, photoID
     }
 
     /// Only for reading the old singular `barcode` field from databases saved before this was
@@ -352,6 +356,7 @@ struct FoodItem: Identifiable, Codable, Hashable, Doseable, Favoritable {
         prices = try container.decodeIfPresent([PriceEntry].self, forKey: .prices) ?? []
         isFavorite = try container.decodeIfPresent(Bool.self, forKey: .isFavorite) ?? false
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? .distantPast
+        photoID = try container.decodeIfPresent(UUID.self, forKey: .photoID)
     }
 
     /// Multiplier turning the stored nutrition values into "nutrition for one dose".
@@ -514,6 +519,8 @@ struct Supplement: Identifiable, Codable, Hashable, Doseable, Favoritable {
     var lowStockThreshold: Double?
     var isFavorite: Bool
     var createdAt: Date
+    /// The supplement's photo in `PhotoStore` (`nil` = none).
+    var photoID: UUID?
 
     init(
         id: UUID = UUID(),
@@ -530,7 +537,8 @@ struct Supplement: Identifiable, Codable, Hashable, Doseable, Favoritable {
         stocks: [SupplementStock] = [],
         lowStockThreshold: Double? = nil,
         isFavorite: Bool = false,
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        photoID: UUID? = nil
     ) {
         self.id = id
         self.name = name
@@ -547,11 +555,12 @@ struct Supplement: Identifiable, Codable, Hashable, Doseable, Favoritable {
         self.lowStockThreshold = lowStockThreshold
         self.isFavorite = isFavorite
         self.createdAt = createdAt
+        self.photoID = photoID
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, name, categoryID, unit, totalSize, doseSize, calories, protein, carbs, fat,
-             prices, stocks, lowStockThreshold, isFavorite, createdAt
+             prices, stocks, lowStockThreshold, isFavorite, createdAt, photoID
     }
 
     init(from decoder: Decoder) throws {
@@ -574,6 +583,7 @@ struct Supplement: Identifiable, Codable, Hashable, Doseable, Favoritable {
         lowStockThreshold = try container.decodeIfPresent(Double.self, forKey: .lowStockThreshold)
         isFavorite = try container.decodeIfPresent(Bool.self, forKey: .isFavorite) ?? false
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? .distantPast
+        photoID = try container.decodeIfPresent(UUID.self, forKey: .photoID)
     }
 
     /// Number of doses the whole package yields, for information/display only.
@@ -612,17 +622,20 @@ struct Recipe: Identifiable, Codable, Equatable, Favoritable {
     var items: [RecipeItem]
     var isFavorite: Bool
     var createdAt: Date
+    /// The recipe's photo in `PhotoStore` (`nil` = none).
+    var photoID: UUID?
 
-    init(id: UUID = UUID(), name: String, items: [RecipeItem], isFavorite: Bool = false, createdAt: Date = Date()) {
+    init(id: UUID = UUID(), name: String, items: [RecipeItem], isFavorite: Bool = false, createdAt: Date = Date(), photoID: UUID? = nil) {
         self.id = id
         self.name = name
         self.items = items
         self.isFavorite = isFavorite
         self.createdAt = createdAt
+        self.photoID = photoID
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, items, isFavorite, createdAt
+        case id, name, items, isFavorite, createdAt, photoID
     }
 
     init(from decoder: Decoder) throws {
@@ -632,6 +645,7 @@ struct Recipe: Identifiable, Codable, Equatable, Favoritable {
         items = try container.decode([RecipeItem].self, forKey: .items)
         isFavorite = try container.decodeIfPresent(Bool.self, forKey: .isFavorite) ?? false
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? .distantPast
+        photoID = try container.decodeIfPresent(UUID.self, forKey: .photoID)
     }
 }
 
@@ -1045,6 +1059,39 @@ struct BodyMeasurement: Identifiable, Codable, Equatable {
     var date: Date
 }
 
+/// Which way the body faces in a progress photo — photos are compared pose by pose.
+enum ProgressPose: String, Codable, CaseIterable, Identifiable {
+    case front, side, back
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .front: return "Frente"
+        case .side: return "Perfil"
+        case .back: return "Costas"
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .front: return "figure.stand"
+        case .side: return "figure.walk"
+        case .back: return "figure.stand.line.dotted.figure.stand"
+        }
+    }
+}
+
+/// One photo of the physical-progress log. The image itself lives in `PhotoStore` (keyed by
+/// `photoID`), not in the JSON database.
+struct ProgressPhoto: Identifiable, Codable, Equatable {
+    var id: UUID = UUID()
+    var date: Date
+    var pose: ProgressPose
+    var photoID: UUID
+    var notes: String?
+}
+
 /// The full contents of a CalorieBuddy database, as exported/imported via JSON.
 ///
 /// Uses a custom decoder so that databases exported before `foodItems`/`recipes`/`mealPlans`
@@ -1066,6 +1113,7 @@ struct AppDatabase: Codable {
     var mealPlans: [MealPlan]
     var nutritionPlans: [NutritionPlan]
     var bodyMeasurements: [BodyMeasurement]
+    var progressPhotos: [ProgressPhoto]
 
     init(
         version: Int,
@@ -1081,7 +1129,8 @@ struct AppDatabase: Codable {
         stockLocations: [StockLocation] = [],
         mealPlans: [MealPlan] = [],
         nutritionPlans: [NutritionPlan] = [],
-        bodyMeasurements: [BodyMeasurement] = []
+        bodyMeasurements: [BodyMeasurement] = [],
+        progressPhotos: [ProgressPhoto] = []
     ) {
         self.version = version
         self.exportedAt = exportedAt
@@ -1097,12 +1146,13 @@ struct AppDatabase: Codable {
         self.mealPlans = mealPlans
         self.nutritionPlans = nutritionPlans
         self.bodyMeasurements = bodyMeasurements
+        self.progressPhotos = progressPhotos
     }
 
     private enum CodingKeys: String, CodingKey {
         case version, exportedAt, settings, entries, foodItems, recipes, stores,
              supplementCategories, supplements, supplementLogs, stockLocations, mealPlans, nutritionPlans,
-             bodyMeasurements
+             bodyMeasurements, progressPhotos
     }
 
     /// Databases written before several meal plans existed had at most one, under `mealPlan`.
@@ -1131,5 +1181,6 @@ struct AppDatabase: Codable {
         }
         nutritionPlans = try container.decodeIfPresent([NutritionPlan].self, forKey: .nutritionPlans) ?? []
         bodyMeasurements = try container.decodeIfPresent([BodyMeasurement].self, forKey: .bodyMeasurements) ?? []
+        progressPhotos = try container.decodeIfPresent([ProgressPhoto].self, forKey: .progressPhotos) ?? []
     }
 }

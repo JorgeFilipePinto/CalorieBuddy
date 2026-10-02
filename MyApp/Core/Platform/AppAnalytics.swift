@@ -22,6 +22,8 @@ enum AppEvent {
     case screenViewed(String)
     case platformSync(automatic: Bool, succeeded: Bool)
     case platformRestore(succeeded: Bool)
+    /// "invite", "update" or "revoke" — never who or what.
+    case dashboardAccessChanged(action: String)
 
     var name: String {
         switch self {
@@ -36,6 +38,7 @@ enum AppEvent {
         case .screenViewed: return "screen_view"
         case .platformSync: return "platform_sync"
         case .platformRestore: return "platform_restore"
+        case .dashboardAccessChanged: return "dashboard_access_changed"
         }
     }
 
@@ -55,6 +58,8 @@ enum AppEvent {
             return ["automatic": automatic, "succeeded": succeeded]
         case .platformRestore(let succeeded):
             return ["succeeded": succeeded]
+        case .dashboardAccessChanged(let action):
+            return ["action": action]
         case .mealPlanImported, .mealPlanExported, .databaseImported, .databaseExported, .personalRecordsViewed:
             return [:]
         }

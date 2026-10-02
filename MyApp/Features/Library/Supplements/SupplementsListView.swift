@@ -131,6 +131,7 @@ struct SupplementsListView: View {
 
     private func supplementRow(_ supplement: Supplement) -> some View {
         HStack {
+            PhotoThumbnail(photoID: supplement.photoID, placeholder: "pills")
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 4) {
                     Text(supplement.name)

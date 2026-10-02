@@ -19,6 +19,7 @@ struct FoodItemEditorView: View {
     var dismissesAfterSave: Bool = true
 
     @State private var name = ""
+    @State private var photoID: UUID?
     @State private var brand = ""
     @State private var unit: MeasurementUnit = .gram
     @State private var doseSizeText = "100"
@@ -67,6 +68,12 @@ struct FoodItemEditorView: View {
     var body: some View {
         NavigationStack {
             Form {
+                #if canImport(UIKit)
+                Section("Foto") {
+                    PhotoPickerField(photoID: $photoID)
+                }
+                #endif
+
                 Section("Alimento") {
                     TextField("Nome", text: $name)
                     TextField("Marca (opcional)", text: $brand)
@@ -301,6 +308,7 @@ struct FoodItemEditorView: View {
             return
         }
         name = item.name
+        photoID = item.photoID
         brand = item.brand ?? ""
         unit = item.unit
         doseSizeText = formatted(item.doseSize)
@@ -340,7 +348,8 @@ struct FoodItemEditorView: View {
             barcodes: barcodes,
             prices: prices,
             isFavorite: itemToEdit?.isFavorite ?? false,
-            createdAt: itemToEdit?.createdAt ?? Date()
+            createdAt: itemToEdit?.createdAt ?? Date(),
+            photoID: photoID
         )
         if itemToEdit == nil {
             store.addFoodItem(item)

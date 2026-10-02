@@ -40,10 +40,15 @@ struct SettingsView: View {
                 } label: {
                     SettingsRowLabel(title: "Plataforma e Sincronização", systemImage: "arrow.triangle.2.circlepath.icloud", color: .blue)
                 }
+                NavigationLink {
+                    DashboardAccessView()
+                } label: {
+                    SettingsRowLabel(title: "Acessos ao Dashboard", systemImage: "person.2.fill", color: .purple)
+                }
             } header: {
                 Text("Plataforma")
             } footer: {
-                Text("Sincroniza o diário, os planos e os dados da app Saúde com o dashboard da plataforma IronMan Project, com backup de toda a base de dados.")
+                Text("Sincroniza o diário, os planos e os dados da app Saúde com o dashboard da plataforma IronMan Project, e escolhe quem pode ver o teu dashboard e o quê.")
             }
 
             Section {
