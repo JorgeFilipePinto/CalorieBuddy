@@ -65,7 +65,7 @@ struct LabelNutritionFields: View {
     enum KeyboardKind { case numberPad, decimalPad }
 }
 
-/// Vitamins, minerals and caffeine from the fixed list: each one present with its amount, unit
+/// Vitamins, minerals, amino acids and sports substances from the fixed list: each one present with its amount, unit
 /// and %VRN, swipe to remove, and a menu to add more. `basis` says what the amounts are for
 /// ("por 100 g", "por dose").
 struct MicronutrientsSection: View {
@@ -119,12 +119,12 @@ struct MicronutrientsSection: View {
                     }
                 }
             } label: {
-                Label("Adicionar Vitamina ou Mineral", systemImage: "plus")
+                Label("Adicionar Nutriente", systemImage: "plus")
             }
         } header: {
-            Text("Vitaminas e Minerais")
+            Text("Vitaminas, Minerais e Outros")
         } footer: {
-            Text("Quantidades \(basis), como no rótulo. A %VRN usa os valores de referência da UE.")
+            Text("Quantidades \(basis), como no rótulo. A %VRN usa os valores de referência da UE (aminoácidos, creatina e afins não têm).")
         }
     }
 }
@@ -147,6 +147,9 @@ struct NutritionFactsRows: View {
             let amount = amounts.micronutrients[nutrient] ?? 0
             let percent = nutrient.percentOfReference(amount).map { " (\(Int($0.rounded()))%)" } ?? ""
             row(nutrient.displayName, "\(Self.format(amount)) \(nutrient.unit)\(percent)")
+        }
+        if let bcaa = amounts.bcaaTotal {
+            row("BCAA total", "\(Self.format(bcaa)) g")
         }
     }
 

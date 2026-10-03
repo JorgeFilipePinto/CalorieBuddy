@@ -730,7 +730,7 @@ struct LogMealPlanOptionView: View {
             ToolbarItem(placement: .confirmationAction) {
                 Button("Registar") {
                     if let recipe {
-                        store.logFoods(lines, groupName: recipe.name, mealType: mealType, date: logDate)
+                        store.logFoods(lines, groupName: recipe.name, mealType: mealType, date: logDate, recipeID: recipe.id)
                         logAnalytics(original: recipe.items)
                     }
                     onLogged()

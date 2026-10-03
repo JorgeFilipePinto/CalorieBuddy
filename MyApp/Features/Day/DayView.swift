@@ -32,6 +32,8 @@ struct DayView: View {
     @State private var jsonImportGroupName = ""
     @State private var jsonImportMealType: MealType = .lunch
     @State private var entryToEdit: FoodEntry?
+    /// A logged recipe whose amounts are being changed (tapping one of its entries).
+    @State private var recipeLogToEdit: FoodEntry?
     @State private var showingDayNutrients = false
 
     private var dayEntries: [FoodEntry] {
@@ -157,11 +159,21 @@ struct DayView: View {
                     Section {
                         ForEach(mealEntries) { entry in
                             Button {
-                                entryToEdit = entry
+                                if loggedRecipe(of: entry) != nil {
+                                    recipeLogToEdit = entry
+                                } else {
+                                    entryToEdit = entry
+                                }
                             } label: {
                                 entryRow(entry)
                             }
                             .buttonStyle(.plain)
+                            .swipeActions(edge: .leading) {
+                                if loggedRecipe(of: entry) != nil {
+                                    Button("Editar Alimento") { entryToEdit = entry }
+                                        .tint(.blue)
+                                }
+                            }
                         }
                         .onDelete { offsets in
                             for index in offsets {
@@ -320,6 +332,20 @@ struct DayView: View {
         }
         .sheet(item: $entryToEdit) { entry in
             AddEntryView(entryToEdit: entry)
+        }
+        .sheet(item: $recipeLogToEdit) { entry in
+            if let recipe = loggedRecipe(of: entry), let groupID = entry.groupID {
+                NavigationStack {
+                    RecipeLogView(recipe: recipe, date: entry.date, mealType: entry.mealType, groupID: groupID) {
+                        recipeLogToEdit = nil
+                    }
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Cancelar") { recipeLogToEdit = nil }
+                        }
+                    }
+                }
+            }
         }
         .sheet(isPresented: $showingJSONImport) {
             JSONImportSheet(
@@ -594,7 +620,7 @@ struct DayView: View {
         AppAnalytics.log(.entryLogged(source: .aiImport, mealType: jsonImportMealType))
     }
 
-    /// "Açúcares 17 g · Saturados 2 g · Sal 1 g · 4 vitaminas e minerais".
+    /// "Açúcares 17 g · Saturados 2 g · Sal 1 g · 4 outros nutrientes".
     private func nutrientPreview(_ amounts: NutritionAmounts) -> String {
         var parts: [String] = []
         if let sugars = amounts.sugars { parts.append("Açúcares \(NutritionFactsRows.format(sugars)) g") }
@@ -602,8 +628,15 @@ struct DayView: View {
         if let fiber = amounts.fiber { parts.append("Fibra \(NutritionFactsRows.format(fiber)) g") }
         if let salt = amounts.salt { parts.append("Sal \(NutritionFactsRows.format(salt)) g") }
         let micros = amounts.micronutrients.count
-        if micros > 0 { parts.append(micros == 1 ? "1 vitamina/mineral" : "\(micros) vitaminas e minerais") }
+        if micros > 0 { parts.append(micros == 1 ? "1 outro nutriente" : "\(micros) outros nutrientes") }
         return parts.joined(separator: " · ")
+    }
+
+    /// The recipe `entry` was logged from, when it still exists (its group's amounts can be
+    /// changed again).
+    private func loggedRecipe(of entry: FoodEntry) -> Recipe? {
+        guard entry.groupID != nil, let recipeID = entry.recipeID else { return nil }
+        return store.recipe(withID: recipeID)
     }
 
     private func entryRow(_ entry: FoodEntry) -> some View {

@@ -57,6 +57,13 @@ struct FoodEntry: Identifiable, Codable, Equatable {
     var salt: Double? = nil
     /// `[Micronutrient.rawValue: amount]`, in each nutrient's unit.
     var micronutrients: [String: Double]? = nil
+    /// The catalog food this was logged from and how many of its doses — while set, editing that
+    /// food rewrites this entry's values (one source of truth). `nil` = typed in by hand.
+    var foodItemID: UUID? = nil
+    var quantity: Double? = nil
+    /// The recipe this was logged from (as part of `groupID`): editing the recipe regenerates the
+    /// group. `nil` when logged otherwise (including a meal-plan option with swapped foods).
+    var recipeID: UUID? = nil
 
     var nutrition: NutritionAmounts {
         NutritionAmounts(

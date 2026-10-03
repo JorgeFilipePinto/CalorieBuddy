@@ -72,6 +72,43 @@ final class DataStore {
         refreshBackupTimestamp()
         seedExampleDataIfNeeded()
         removeOrphanPhotos()
+        linkDiaryEntriesToFoodsIfNeeded()
+    }
+
+    /// Entries logged before they recorded their food: once, link each one to the catalog food of
+    /// the same name when some quantity of it reproduces the entry's kcal and macros — so editing
+    /// that food updates them too. Values aren't touched here; anything ambiguous stays unlinked.
+    private func linkDiaryEntriesToFoodsIfNeeded() {
+        let key = "CalorieBuddy.hasLinkedDiaryEntries"
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
+        if linkUnlinkedDiaryEntries() > 0 { persistActive() }
+        UserDefaults.standard.set(true, forKey: key)
+    }
+
+    /// Links what it can (see `linkDiaryEntriesToFoodsIfNeeded`) and returns how many; the caller
+    /// persists. Also run on a database adopted from elsewhere (restore, import).
+    @discardableResult
+    private func linkUnlinkedDiaryEntries() -> Int {
+        var linked = 0
+        let foodsByName = Dictionary(grouping: foodItems) { $0.name.trimmingCharacters(in: .whitespaces).lowercased() }
+        for index in entries.indices where entries[index].foodItemID == nil {
+            let entry = entries[index]
+            guard let candidates = foodsByName[entry.name.trimmingCharacters(in: .whitespaces).lowercased()],
+                  candidates.count == 1, let food = candidates.first else { continue }
+            let perDose = food.nutrition(quantity: 1)
+            guard perDose.calories > 0, entry.calories > 0 else { continue }
+            let quantity = Double(entry.calories) / perDose.calories
+            func matches(_ stated: Double?, _ perDose: Double?) -> Bool {
+                guard let stated, let perDose else { return true }
+                return abs(stated - perDose * quantity) <= max(1, stated * 0.05)
+            }
+            guard matches(entry.protein, perDose.protein), matches(entry.carbs, perDose.carbs),
+                  matches(entry.fat, perDose.fat) else { continue }
+            entries[index].foodItemID = food.id
+            entries[index].quantity = (quantity * 1000).rounded() / 1000
+            linked += 1
+        }
+        return linked
     }
 
     /// Deletes photo files no record points at — neither in the active database nor in the
@@ -389,6 +426,21 @@ final class DataStore {
         }
     }
 
+    /// How much food `items` add up to, per kind of unit: "350 g · 200 ml · 2 unidades".
+    func amountSummary(of items: [RecipeItem]) -> String {
+        var totals: [MeasurementUnit: Double] = [:]
+        for item in items {
+            guard let food = foodItems.first(where: { $0.id == item.foodItemID }) else { continue }
+            totals[food.unit.baseUnit, default: 0] += item.quantity * food.doseSize * food.unit.baseMultiplier
+        }
+        return [MeasurementUnit.gram, .milliliter, .unit].compactMap { unit in
+            guard let amount = totals[unit], amount > 0 else { return nil }
+            let number = RecipeIngredientEditorView.number(amount)
+            return unit == .unit ? "\(number) \(amount == 1 ? "unidade" : "unidades")" : "\(number) \(unit.shortLabel)"
+        }
+        .joined(separator: " · ")
+    }
+
     /// Everything eaten on `date`: the diary entries plus the supplement intakes.
     func fullNutrition(on date: Date) -> NutritionAmounts {
         let eaten = entries(on: date).reduce(NutritionAmounts.zero) { $0 + $1.nutrition }
@@ -643,29 +695,67 @@ final class DataStore {
 
     /// Logs one dose-scaled entry from a catalog food item.
     func logFoodItem(_ item: FoodItem, quantity: Double, mealType: MealType, date: Date) {
-        let entry = FoodEntry(
+        var entry = FoodEntry(
             name: item.name,
             nutrition: item.nutrition(quantity: quantity),
             mealType: mealType,
             date: date,
             barcode: item.barcodes.first
         )
+        entry.foodItemID = item.id
+        entry.quantity = quantity
         addEntry(entry)
     }
 
-    /// Logs every food in a recipe at once, tagged with a shared group so they're recognizable
-    /// as having come from the same recipe.
-    func logRecipe(_ recipe: Recipe, mealType: MealType, date: Date) {
-        logFoods(recipe.items, groupName: recipe.name, mealType: mealType, date: date)
+    /// Logs a recipe: one entry per ingredient, tagged with a shared group and linked to the
+    /// recipe. `items` are the amounts actually eaten (the recipe's own amounts are only the
+    /// defaults); an ingredient at 0 is left out.
+    func logRecipe(_ recipe: Recipe, items: [RecipeItem]? = nil, mealType: MealType, date: Date) {
+        logFoods((items ?? recipe.items).filter { $0.quantity > 0 }, groupName: recipe.name, mealType: mealType,
+                 date: date, recipeID: recipe.id)
+    }
+
+    /// The entries of one logged recipe (or meal-plan option), oldest first.
+    func entries(inGroup groupID: UUID) -> [FoodEntry] {
+        entries.filter { $0.groupID == groupID }.sorted { $0.date < $1.date }
+    }
+
+    /// Logs a recipe group again with new amounts (or meal), in place: same group, day and time;
+    /// an entry whose food is still there keeps its id. An ingredient at 0 is removed.
+    func relogRecipe(_ recipe: Recipe, group groupID: UUID, items: [RecipeItem], mealType: MealType) {
+        let old = entries(inGroup: groupID)
+        guard let date = old.first?.date else { return }
+        var replaced = linkedEntries(for: items.filter { $0.quantity > 0 }, groupID: groupID, groupName: recipe.name,
+                                     mealType: mealType, date: date, recipeID: recipe.id)
+        for index in replaced.indices {
+            if let previous = old.first(where: { $0.foodItemID == replaced[index].foodItemID }) {
+                replaced[index].id = previous.id
+                replaced[index].barcode = previous.barcode
+            }
+        }
+        entries.removeAll { $0.groupID == groupID }
+        entries.append(contentsOf: replaced)
+        persistActive()
     }
 
     /// Logs a list of catalog foods at once (e.g. a recipe with some foods swapped), tagged with
     /// a shared group named `groupName`.
-    func logFoods(_ items: [RecipeItem], groupName: String, mealType: MealType, date: Date) {
-        let groupID = UUID()
-        let newEntries: [FoodEntry] = items.compactMap { recipeItem in
+    /// `recipeID`: the recipe they were logged from, so the day can reopen its amounts and a
+    /// rename follows.
+    func logFoods(_ items: [RecipeItem], groupName: String, mealType: MealType, date: Date, recipeID: UUID? = nil) {
+        let newEntries = linkedEntries(for: items, groupID: UUID(), groupName: groupName, mealType: mealType,
+                                       date: date, recipeID: recipeID)
+        guard !newEntries.isEmpty else { return }
+        entries.append(contentsOf: newEntries)
+        persistActive()
+    }
+
+    /// One entry per catalog food of `items`, linked to its food (and recipe).
+    private func linkedEntries(for items: [RecipeItem], groupID: UUID, groupName: String, mealType: MealType,
+                               date: Date, recipeID: UUID?) -> [FoodEntry] {
+        items.compactMap { recipeItem in
             guard let food = foodItems.first(where: { $0.id == recipeItem.foodItemID }) else { return nil }
-            return FoodEntry(
+            var entry = FoodEntry(
                 name: food.name,
                 nutrition: food.nutrition(quantity: recipeItem.quantity),
                 mealType: mealType,
@@ -674,10 +764,36 @@ final class DataStore {
                 groupID: groupID,
                 groupName: groupName
             )
+            entry.foodItemID = food.id
+            entry.quantity = recipeItem.quantity
+            entry.recipeID = recipeID
+            return entry
         }
-        guard !newEntries.isEmpty else { return }
-        entries.append(contentsOf: newEntries)
-        persistActive()
+    }
+
+    /// After `food` changed: every diary entry logged from it gets its current values (and name),
+    /// so the day — and the dashboard — never show a stale version of the same food.
+    private func refreshEntries(linkedTo food: FoodItem) {
+        for index in entries.indices where entries[index].foodItemID == food.id {
+            guard let quantity = entries[index].quantity else { continue }
+            let old = entries[index]
+            var updated = FoodEntry(name: food.name, nutrition: food.nutrition(quantity: quantity),
+                                    mealType: old.mealType, date: old.date, barcode: old.barcode,
+                                    groupID: old.groupID, groupName: old.groupName)
+            updated.id = old.id
+            updated.foodItemID = old.foodItemID
+            updated.quantity = quantity
+            updated.recipeID = old.recipeID
+            entries[index] = updated
+        }
+    }
+
+    /// After `recipe` changed: what was logged from it keeps its amounts (they're what was eaten,
+    /// and each ingredient already follows its food) — only the group name follows a rename.
+    private func renameEntries(loggedFrom recipe: Recipe) {
+        for index in entries.indices where entries[index].recipeID == recipe.id && entries[index].groupName != recipe.name {
+            entries[index].groupName = recipe.name
+        }
     }
 
     /// Adds a batch of pre-built entries at once (e.g. from AI-generated JSON pasted into the
@@ -743,6 +859,7 @@ final class DataStore {
     func updateFoodItem(_ item: FoodItem) {
         guard let index = foodItems.firstIndex(where: { $0.id == item.id }) else { return }
         foodItems[index] = item
+        refreshEntries(linkedTo: item)
         persistActive()
     }
 
@@ -797,6 +914,7 @@ final class DataStore {
     func updateRecipe(_ recipe: Recipe) {
         guard let index = recipes.firstIndex(where: { $0.id == recipe.id }) else { return }
         recipes[index] = recipe
+        renameEntries(loggedFrom: recipe)
         persistActive()
     }
 
@@ -1157,6 +1275,7 @@ final class DataStore {
         nutritionPlans = database.nutritionPlans
         bodyMeasurements = database.bodyMeasurements
         progressPhotos = database.progressPhotos
+        linkUnlinkedDiaryEntries()
         persistActive(countingChange: false)
         refreshBackupTimestamp()
     }

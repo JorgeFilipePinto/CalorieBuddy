@@ -420,7 +420,7 @@ extension AIJSONImport {
         - calories: energia em kcal (número inteiro).
         - protein, carbs, fat: proteína, hidratos de carbono e lípidos, em gramas.
         - saturatedFat, sugars, fiber, salt (opcionais): lípidos saturados, açúcares, fibra e sal, em gramas, como no rótulo.
-        - minerals, vitamins (opcionais): listas de { name, amount, unit }, com unit "mg" ou "µg" (ex.: Potássio, Magnésio, Vitamina C, Tiamina (B1), Cafeína).
+        - minerals, vitamins (opcionais): listas de { name, amount, unit }, com unit "g", "mg" ou "µg" (ex.: Potássio, Magnésio, Vitamina C, Tiamina (B1), Cafeína). Aminoácidos e substâncias de desporto também vão em "minerals" (ex.: Leucina, Isoleucina, Valina, Glutamina, Creatina, Beta-alanina, Citrulina, Taurina, L-carnitina, HMB, EPA, DHA).
         Se eu descrever vários alimentos, devolve um array com um objeto por alimento.
         """,
         template: """
@@ -439,10 +439,10 @@ extension AIJSONImport {
           "fiber": <gramas>,
           "salt": <gramas>,
           "minerals": [
-            { "name": "<mineral>", "amount": <quantidade>, "unit": "<mg | µg>" }
+            { "name": "<mineral>", "amount": <quantidade>, "unit": "<g | mg | µg>" }
           ],
           "vitamins": [
-            { "name": "<vitamina>", "amount": <quantidade>, "unit": "<mg | µg>" }
+            { "name": "<vitamina>", "amount": <quantidade>, "unit": "<g | mg | µg>" }
           ]
         }
         """
@@ -528,7 +528,7 @@ extension AIJSONImport {
             - calories (opcional): energia de uma dose, em kcal (número inteiro).
             - protein, carbs, fat (opcionais): proteína, hidratos de carbono e lípidos de uma dose, em gramas.
             - saturatedFat, sugars, fiber, salt (opcionais): lípidos saturados, açúcares, fibra e sal de uma dose, em gramas.
-            - minerals, vitamins (opcionais): listas de { name, amount, unit } por dose, com unit "mg" ou "µg" (ex.: Potássio, Magnésio, Selénio, Vitamina C, Niacina (B3), Cafeína).
+            - minerals, vitamins (opcionais): listas de { name, amount, unit } por dose, com unit "g", "mg" ou "µg" (ex.: Potássio, Magnésio, Selénio, Vitamina C, Niacina (B3), Cafeína). Aminoácidos e substâncias de desporto também vão em "minerals" (ex.: Creatina, Leucina, Isoleucina, Valina, Glutamina, Beta-alanina, Citrulina, Taurina, L-carnitina, HMB, EPA, DHA).
             Os valores nutricionais são por dose, não por 100 g. Se eu descrever vários suplementos, devolve um array com um objeto por suplemento.
             """,
             template: """
@@ -547,10 +547,10 @@ extension AIJSONImport {
               "fiber": <gramas por dose>,
               "salt": <gramas por dose>,
               "minerals": [
-                { "name": "<mineral>", "amount": <quantidade por dose>, "unit": "<mg | µg>" }
+                { "name": "<mineral>", "amount": <quantidade por dose>, "unit": "<g | mg | µg>" }
               ],
               "vitamins": [
-                { "name": "<vitamina>", "amount": <quantidade por dose>, "unit": "<mg | µg>" }
+                { "name": "<vitamina>", "amount": <quantidade por dose>, "unit": "<g | mg | µg>" }
               ]
             }
             """

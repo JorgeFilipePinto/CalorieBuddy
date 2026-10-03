@@ -12,6 +12,7 @@ struct RecipeEditorView: View {
     @State private var items: [RecipeItem] = []
     @State private var showingAddComponent = false
     @State private var showingJSONImport = false
+    @State private var editingItem: RecipeItem?
 
     init(recipeToEdit: Recipe? = nil) {
         self.recipeToEdit = recipeToEdit
@@ -55,22 +56,31 @@ struct RecipeEditorView: View {
                 Section {
                     ForEach(items) { item in
                         if let food = store.foodItems.first(where: { $0.id == item.foodItemID }) {
-                            HStack {
-                                VStack(alignment: .leading) {
-                                    Text(food.name)
-                                    HStack(spacing: 4) {
-                                        Text("\(quantityLabel(item.quantity)) × \(food.doseLabel)")
-                                        if let itemCost = store.cost(for: food, quantity: item.quantity) {
-                                            Text("· \(itemCost.formatted(.currency(code: currencyCode)))")
+                            Button {
+                                editingItem = item
+                            } label: {
+                                HStack {
+                                    VStack(alignment: .leading) {
+                                        Text(food.name)
+                                            .foregroundStyle(.primary)
+                                        HStack(spacing: 4) {
+                                            Text(RecipeIngredientEditorView.amountLabel(food: food, quantity: item.quantity))
+                                            if let itemCost = store.cost(for: food, quantity: item.quantity) {
+                                                Text("· \(itemCost.formatted(.currency(code: currencyCode)))")
+                                            }
                                         }
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
                                     }
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                    Spacer()
+                                    Text("\(food.scaledCalories(quantity: item.quantity)) kcal")
+                                        .foregroundStyle(.secondary)
+                                    Image(systemName: "chevron.right")
+                                        .font(.caption)
+                                        .foregroundStyle(.tertiary)
                                 }
-                                Spacer()
-                                Text("\(food.scaledCalories(quantity: item.quantity)) kcal")
-                                    .foregroundStyle(.secondary)
                             }
+                            .tint(.primary)
                         }
                     }
                     .onDelete { offsets in items.remove(atOffsets: offsets) }
@@ -82,12 +92,13 @@ struct RecipeEditorView: View {
                     }
                     .disabled(store.foodItems.isEmpty)
                 } header: {
-                    Text("Alimentos")
+                    Text("Ingredientes · Quantidades por Omissão")
                 } footer: {
                     if store.foodItems.isEmpty {
                         Text("Cria primeiro alimentos no catálogo.")
                     } else if !items.isEmpty {
-                        Text("Total: \(totalCalories) kcal" + (totalCost > 0 ? " · \(totalCost.formatted(.currency(code: currencyCode)))" : ""))
+                        Text("Total: \(totalCalories) kcal" + (totalCost > 0 ? " · \(totalCost.formatted(.currency(code: currencyCode)))" : "")
+                             + ". Ao registar no diário escolhes quanto comeste de cada ingrediente; estas quantidades são só o ponto de partida.")
                     }
                 }
 
@@ -95,9 +106,9 @@ struct RecipeEditorView: View {
                     Section {
                         NutritionFactsRows(amounts: store.fullNutrition(of: items))
                     } header: {
-                        Text("Declaração Nutricional")
+                        Text("Declaração Nutricional · \(store.amountSummary(of: items))")
                     } footer: {
-                        Text("A receita inteira, somada dos ingredientes. Os valores que um ingrediente não indica não entram no total.")
+                        Text("Para as quantidades por omissão acima (\(store.amountSummary(of: items)) no total), somada dos ingredientes. Os valores que um ingrediente não indica não entram no total.")
                     }
                 }
             }
@@ -119,6 +130,13 @@ struct RecipeEditorView: View {
                 }
             }
             .onAppear(perform: populateIfEditing)
+            .sheet(item: $editingItem) { item in
+                if let food = store.foodItems.first(where: { $0.id == item.foodItemID }) {
+                    RecipeIngredientEditorView(food: food, quantity: item.quantity) { quantity in
+                        if let index = items.firstIndex(where: { $0.id == item.id }) { items[index].quantity = quantity }
+                    }
+                }
+            }
             .sheet(isPresented: $showingAddComponent) {
                 RecipeComponentPickerView(existingFoodIDs: Set(items.map(\.foodItemID))) { foodItemID, quantity in
                     items.append(RecipeItem(foodItemID: foodItemID, quantity: quantity))
@@ -134,12 +152,6 @@ struct RecipeEditorView: View {
                 }
             }
         }
-    }
-
-    private func quantityLabel(_ quantity: Double) -> String {
-        quantity.truncatingRemainder(dividingBy: 1) == 0
-            ? String(Int(quantity))
-            : String(format: "%.1f", quantity)
     }
 
     private func populateIfEditing() {
@@ -186,15 +198,29 @@ private struct RecipeComponentPickerView: View {
     let onAdd: (UUID, Double) -> Void
 
     @State private var selectedFoodID: UUID?
-    @State private var quantityText = "1"
+    /// The amount in the food's own unit (g, ml, units…); stored in the recipe as doses.
+    @State private var amountText = ""
     @State private var showingNewFoodItem = false
+    /// Barcode to prefill the new food with (scanned but not in the catalog).
+    @State private var newFoodBarcode: String?
+    @State private var showingScanner = false
+    /// What the scanner read, handled once its sheet is gone (an alert can't show over it).
+    @State private var scannedCode: String?
+    @State private var unknownBarcode: String?
+    @State private var alreadyInRecipe: String?
 
     private var availableFoods: [FoodItem] {
         store.foodItems.filter { !existingFoodIDs.contains($0.id) }
     }
 
+    private var selectedFood: FoodItem? {
+        selectedFoodID.flatMap { id in store.foodItems.first { $0.id == id } }
+    }
+
     private var quantity: Double? {
-        Double(quantityText.replacingOccurrences(of: ",", with: "."))
+        guard let food = selectedFood, food.doseSize > 0,
+              let amount = Double(amountText.replacingOccurrences(of: ",", with: ".")), amount > 0 else { return nil }
+        return amount / food.doseSize
     }
 
     var body: some View {
@@ -207,24 +233,41 @@ private struct RecipeComponentPickerView: View {
                             Text(food.name).tag(Optional(food.id))
                         }
                     }
-                    HStack {
-                        Text("Quantidade")
-                        Spacer()
-                        TextField("1", text: $quantityText)
-                            .keyboardType(.decimalPad)
-                            .multilineTextAlignment(.trailing)
-                            .frame(width: 80)
+                    if let food = selectedFood {
+                        HStack {
+                            Text("Quantidade")
+                            Spacer()
+                            TextField(RecipeIngredientEditorView.number(food.doseSize), text: $amountText)
+                                .keyboardType(.decimalPad)
+                                .multilineTextAlignment(.trailing)
+                                .frame(width: 80)
+                            Text(food.unit.shortLabel)
+                                .foregroundStyle(.secondary)
+                        }
+                        if let quantity {
+                            Text("\(food.scaledCalories(quantity: quantity)) kcal")
+                                .foregroundStyle(.secondary)
+                        }
                     }
+                }
+                .onChange(of: selectedFoodID) {
+                    amountText = selectedFood.map { RecipeIngredientEditorView.number($0.doseSize) } ?? ""
                 }
 
                 Section {
                     Button {
+                        showingScanner = true
+                    } label: {
+                        Label("Digitalizar Código de Barras", systemImage: "barcode.viewfinder")
+                    }
+                    Button {
+                        newFoodBarcode = nil
                         showingNewFoodItem = true
                     } label: {
                         Label("Criar Novo Alimento", systemImage: "plus.circle")
                     }
                 } footer: {
-                    Text("O novo alimento fica guardado no catálogo e é adicionado à receita automaticamente.")
+                    Text("Um código que já está no catálogo escolhe esse alimento; um código novo abre a criação manual com o código preenchido. O novo alimento fica guardado no catálogo e é adicionado à receita automaticamente.")
                 }
             }
             .navigationTitle("Adicionar Alimento")
@@ -243,12 +286,145 @@ private struct RecipeComponentPickerView: View {
                 }
             }
             .sheet(isPresented: $showingNewFoodItem) {
-                FoodItemEditorView { newItem in
+                FoodItemEditorView(initialBarcode: newFoodBarcode) { newItem in
                     onAdd(newItem.id, 1)
                     dismiss()
                 }
             }
+            .sheet(isPresented: $showingScanner, onDismiss: handleScannedCode) {
+                BarcodeScannerView { code in scannedCode = code }
+            }
+            .alert("Alimento Não Encontrado", isPresented: Binding(
+                get: { unknownBarcode != nil },
+                set: { if !$0 { unknownBarcode = nil } }
+            )) {
+                Button("Criar Manualmente") {
+                    newFoodBarcode = unknownBarcode
+                    unknownBarcode = nil
+                    showingNewFoodItem = true
+                }
+                Button("Cancelar", role: .cancel) { unknownBarcode = nil }
+            } message: {
+                Text("O código \(unknownBarcode ?? "") não está em nenhum alimento do catálogo. Preenche os dados do rótulo para o criar — fica com este código.")
+            }
+            .alert("Já Está na Receita", isPresented: Binding(
+                get: { alreadyInRecipe != nil },
+                set: { if !$0 { alreadyInRecipe = nil } }
+            )) {
+                Button("OK", role: .cancel) { alreadyInRecipe = nil }
+            } message: {
+                Text("\(alreadyInRecipe ?? "Este alimento") já faz parte da receita — toca nele na lista para mudar a quantidade.")
+            }
         }
+    }
+
+    /// A known code picks its food (amount prefilled with one dose); an unknown one warns and
+    /// then opens the manual editor with the code filled in.
+    private func handleScannedCode() {
+        guard let code = scannedCode else { return }
+        scannedCode = nil
+        guard let food = store.foodItem(forBarcode: code) else {
+            unknownBarcode = code
+            return
+        }
+        if existingFoodIDs.contains(food.id) {
+            alreadyInRecipe = food.name
+        } else {
+            selectedFoodID = food.id
+        }
+    }
+}
+
+/// One ingredient of a recipe: how much of it the recipe uses (in the food's own unit), and a way
+/// into the food itself — which changes it in every recipe and in the diary, since there's only
+/// one version of each food.
+struct RecipeIngredientEditorView: View {
+    @Environment(DataStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+
+    let food: FoodItem
+    let onSave: (Double) -> Void
+
+    @State private var amountText: String
+    @State private var showingFoodEditor = false
+
+    init(food: FoodItem, quantity: Double, onSave: @escaping (Double) -> Void) {
+        self.food = food
+        self.onSave = onSave
+        _amountText = State(initialValue: Self.number(quantity * food.doseSize))
+    }
+
+    /// The food as it is now (it may have just been edited).
+    private var current: FoodItem { store.foodItems.first { $0.id == food.id } ?? food }
+
+    private var quantity: Double? {
+        guard current.doseSize > 0,
+              let amount = Double(amountText.replacingOccurrences(of: ",", with: ".")), amount > 0 else { return nil }
+        return amount / current.doseSize
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    HStack {
+                        Text("Quantidade por omissão")
+                        Spacer()
+                        TextField("0", text: $amountText)
+                            .keyboardType(.decimalPad)
+                            .multilineTextAlignment(.trailing)
+                            .frame(width: 80)
+                        Text(current.unit.shortLabel)
+                            .foregroundStyle(.secondary)
+                    }
+                } footer: {
+                    Text("A quantidade por omissão desta receita. Os registos já feitos mantêm as suas quantidades.")
+                }
+
+                if let quantity {
+                    Section("Nesta Quantidade") {
+                        NutritionFactsRows(amounts: current.nutrition(quantity: quantity))
+                    }
+                }
+
+                Section {
+                    Button {
+                        showingFoodEditor = true
+                    } label: {
+                        Label("Editar \(current.name)", systemImage: "pencil")
+                    }
+                } footer: {
+                    Text("Há uma só versão de cada alimento: mudar os valores aqui muda-os em todas as receitas que o usam e nos registos do diário feitos com ele.")
+                }
+            }
+            .navigationTitle(current.name)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancelar") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("OK") {
+                        if let quantity { onSave(quantity) }
+                        dismiss()
+                    }
+                    .disabled(quantity == nil)
+                }
+            }
+            .sheet(isPresented: $showingFoodEditor) {
+                FoodItemEditorView(itemToEdit: current)
+            }
+        }
+    }
+
+    /// "20 g", "1.5 unidade", "250 ml" — what `quantity` doses of `food` amount to.
+    static func amountLabel(food: FoodItem, quantity: Double) -> String {
+        "\(number(quantity * food.doseSize)) \(food.unit.shortLabel)"
+    }
+
+    static func number(_ value: Double) -> String {
+        let rounded = (value * 10).rounded() / 10
+        return rounded.truncatingRemainder(dividingBy: 1) == 0 ? String(Int(rounded)) : String(format: "%.1f", rounded)
     }
 }
 

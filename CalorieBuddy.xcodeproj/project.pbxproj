@@ -250,6 +250,7 @@
 		000000000000000111000000 /* Debug configuration for PBXNativeTarget "CalorieBuddy" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = CalorieBuddy.entitlements;
 				CODE_SIGN_STYLE = Automatic;
@@ -260,7 +261,7 @@
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "CalorieBuddy-Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = CalorieBuddy;
+				INFOPLIST_KEY_CFBundleDisplayName = "IronMan Project 2027";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.healthcare-fitness";
 				INFOPLIST_KEY_NSCameraUsageDescription = "A CalorieBuddy usa a câmara para digitalizar códigos de barras e para fotografar alimentos, receitas, suplementos e a tua evolução física, e refeições ou rótulos que queiras enviar a um assistente de IA.";
 				INFOPLIST_KEY_NSHealthShareUsageDescription = "A CalorieBuddy lê o teu peso, altura, massa gorda, massa magra, IMC, perímetro da cintura, sono, água, café, calorias queimadas, frequência cardíaca e treinos da app Saúde para os mostrar aqui, calcular os teus recordes pessoais e, se iniciares sessão, sincronizá-los com a tua plataforma IronMan Project.";
@@ -300,6 +301,7 @@
 		000000000000000112000000 /* Release configuration for PBXNativeTarget "CalorieBuddy" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = CalorieBuddy.entitlements;
 				CODE_SIGN_STYLE = Automatic;
@@ -310,7 +312,7 @@
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "CalorieBuddy-Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = CalorieBuddy;
+				INFOPLIST_KEY_CFBundleDisplayName = "IronMan Project 2027";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.healthcare-fitness";
 				INFOPLIST_KEY_NSCameraUsageDescription = "A CalorieBuddy usa a câmara para digitalizar códigos de barras e para fotografar alimentos, receitas, suplementos e a tua evolução física, e refeições ou rótulos que queiras enviar a um assistente de IA.";
 				INFOPLIST_KEY_NSHealthShareUsageDescription = "A CalorieBuddy lê o teu peso, altura, massa gorda, massa magra, IMC, perímetro da cintura, sono, água, café, calorias queimadas, frequência cardíaca e treinos da app Saúde para os mostrar aqui, calcular os teus recordes pessoais e, se iniciares sessão, sincronizá-los com a tua plataforma IronMan Project.";

@@ -243,7 +243,8 @@ final class PlatformSyncManager {
         for collection in AppCollection.all(of: database) where collection.name != AppCollection.settings {
             switch collection.name {
             case AppCollection.entries:
-                let rows = collection.documents.compactMap { $0.value as? FoodEntry }.map(Self.foodEntryRow)
+                let foods = Dictionary(database.foodItems.map { ($0.id, $0) }) { first, _ in first }
+                let rows = collection.documents.compactMap { $0.value as? FoodEntry }.map { Self.foodEntryRow($0, foods: foods) }
                 for batch in rows.chunked(into: Self.batchSize) { try await client.upsert("food_entries", rows: batch, onConflict: "id") }
             case AppCollection.foodItems:
                 let rows = collection.documents.compactMap { $0.value as? FoodItem }.map(Self.foodItemRow)
@@ -251,6 +252,9 @@ final class PlatformSyncManager {
             case AppCollection.progressPhotos:
                 let rows = collection.documents.compactMap { $0.value as? ProgressPhoto }.map(Self.progressPhotoRow)
                 for batch in rows.chunked(into: Self.batchSize) { try await client.upsert("progress_photos", rows: batch, onConflict: "id") }
+            case AppCollection.supplements:
+                let rows = collection.documents.compactMap { $0.value as? Supplement }.map { Self.supplementRow($0, in: database) }
+                for batch in rows.chunked(into: Self.batchSize) { try await client.upsert("supplements", rows: batch, onConflict: "id") }
             default:
                 break
             }
@@ -593,7 +597,8 @@ final class PlatformSyncManager {
             // Typed rows first, so the dashboard has them even if the backup part fails.
             switch collection.name {
             case AppCollection.entries:
-                let rows = typed.compactMap { $0.value as? FoodEntry }.map(Self.foodEntryRow)
+                let foods = Dictionary(database.foodItems.map { ($0.id, $0) }) { first, _ in first }
+                let rows = typed.compactMap { $0.value as? FoodEntry }.map { Self.foodEntryRow($0, foods: foods) }
                 for batch in rows.chunked(into: Self.batchSize) {
                     try await client.upsert("food_entries", rows: batch, onConflict: "id")
                 }
@@ -610,6 +615,12 @@ final class PlatformSyncManager {
                     try await client.upsert("progress_photos", rows: batch, onConflict: "id")
                 }
                 try await softDelete("progress_photos", ids: deleted)
+            case AppCollection.supplements:
+                let rows = typed.compactMap { $0.value as? Supplement }.map { Self.supplementRow($0, in: database) }
+                for batch in rows.chunked(into: Self.batchSize) {
+                    try await client.upsert("supplements", rows: batch, onConflict: "id")
+                }
+                try await softDelete("supplements", ids: deleted)
             default:
                 break
             }
@@ -713,8 +724,19 @@ final class PlatformSyncManager {
 
     /// A diary entry as the dashboard's `food_entries` row. The app doesn't record quantities
     /// or fibre; missing macros are sent as 0.
-    private static func foodEntryRow(_ entry: FoodEntry) -> [String: Any] {
-        [
+    /// `foods`: the catalog, to point the row at the food it was logged from (food_item_id) with
+    /// the amount eaten in g / ml / units.
+    private static func foodEntryRow(_ entry: FoodEntry, foods: [UUID: FoodItem]) -> [String: Any] {
+        let food = entry.foodItemID.flatMap { foods[$0] }
+        let amount = food.flatMap { food in entry.quantity.map { $0 * food.baseDoseAmount } }
+        let amountUnit: String? = food.map { food in
+            switch food.unit.baseUnit {
+            case .milliliter: return "ml"
+            case .unit: return "unit"
+            default: return "g"
+            }
+        }
+        return [
             "id": entry.id.uuidString,
             "eaten_at": SupabaseClient.timestamp(entry.date),
             "meal": entry.mealType.rawValue,
@@ -729,6 +751,9 @@ final class PlatformSyncManager {
             "sugars_g": entry.sugars.map { clamp($0, max: 9_999) } ?? NSNull(),
             "salt_g": entry.salt.map { clamp($0, max: 9_999) } ?? NSNull(),
             "micronutrients": (entry.micronutrients ?? [:]).filter { $0.value.isFinite && $0.value >= 0 },
+            "food_item_id": food?.id.uuidString ?? NSNull(),
+            "quantity": amount.flatMap { $0 > 0 ? clamp($0, max: 999_999) : nil } ?? NSNull(),
+            "unit": amount.flatMap { $0 > 0 ? amountUnit : nil } ?? NSNull(),
             "barcode": entry.barcode ?? NSNull(),
             "group_id": entry.groupID?.uuidString ?? NSNull(),
             "group_name": entry.groupName ?? NSNull(),
@@ -763,6 +788,44 @@ final class PlatformSyncManager {
                 .filter { $0.value.isFinite && $0.value >= 0 }
                 .mapValues { $0 * factor },
             "photo_path": item.photoID.map { photoPath("food", $0) } ?? NSNull(),
+            "source": "ios_app",
+            "deleted_at": NSNull()
+        ]
+    }
+
+    /// A supplement as the dashboard's `supplements` row — what someone with the supplements
+    /// category sees: stock per location (by name) and in total, and what one dose holds.
+    private static func supplementRow(_ supplement: Supplement, in database: AppDatabase) -> [String: Any] {
+        let unit: String = switch supplement.unit.baseUnit {
+        case .milliliter: "ml"
+        case .unit: "unit"
+        default: "g"
+        }
+        let toBase = supplement.unit.baseMultiplier
+        let locationName = Dictionary(database.stockLocations.map { ($0.id, $0.name) }) { first, _ in first }
+        let stocks = supplement.stocks.map { stock -> [String: Any] in
+            ["location": locationName[stock.locationID] ?? "?", "remaining": max(stock.remaining * toBase, 0)]
+        }
+        let dose = supplement.nutrition(quantity: 1)
+        func grams(_ value: Double?) -> Any { value.map { clamp($0, max: 9_999) } ?? NSNull() }
+        return [
+            "id": supplement.id.uuidString,
+            "name": supplement.name,
+            "category": database.supplementCategories.first { $0.id == supplement.categoryID }?.name ?? NSNull(),
+            "unit": unit,
+            "package_size": clamp(supplement.totalSize * toBase, max: 99_999_999),
+            "dose_size": clamp(supplement.doseSize * toBase, max: 99_999_999),
+            "stocks": stocks,
+            "stock_total": clamp(supplement.totalRemaining * toBase, max: 99_999_999),
+            "low_stock_threshold": supplement.lowStockThreshold.map { clamp($0 * toBase, max: 99_999_999) } ?? NSNull(),
+            "kcal_per_dose": supplement.calories == nil ? NSNull() : clamp(dose.calories, max: 99_999) as Any,
+            "protein_g_per_dose": grams(dose.protein),
+            "carbs_g_per_dose": grams(dose.carbs),
+            "sugars_g_per_dose": grams(dose.sugars),
+            "fat_g_per_dose": grams(dose.fat),
+            "salt_g_per_dose": grams(dose.salt),
+            "micronutrients_per_dose": dose.micronutrients.stored.filter { $0.value.isFinite && $0.value >= 0 },
+            "photo_path": supplement.photoID.map { photoPath("supplement", $0) } ?? NSNull(),
             "source": "ios_app",
             "deleted_at": NSNull()
         ]
@@ -954,8 +1017,9 @@ private struct AppCollection {
 
     static func all(of database: AppDatabase) -> [AppCollection] {
         [
-            AppCollection(entries, database.entries),
+            // Foods before the diary: an entry's typed row points at its food's (food_item_id).
             AppCollection(foodItems, database.foodItems),
+            AppCollection(entries, database.entries),
             AppCollection(foodCategories, database.foodCategories),
             AppCollection(recipes, database.recipes),
             AppCollection(stores, database.stores),
@@ -993,7 +1057,8 @@ private struct PlatformSyncState: Codable {
     /// Bump when `foodItemRow`/`foodEntryRow`/`progressPhotoRow` gain columns, to re-send every
     /// record once. 1: food_items.photo_path and progress_photos. 2: the full nutrition label
     /// (sugars, saturated fat, fibre, salt, micronutrients — migration nutrition_details).
-    static let currentTypedRowsVersion = 2
+    /// 3: supplements (migration supplements_catalog) and food_entries.food_item_id/quantity.
+    static let currentTypedRowsVersion = 3
 
     /// One file per server: a Debug build (local Supabase) and a Release build (the VPS) on the
     /// same iPhone must not share what they think was already sent.
