@@ -1,24 +1,20 @@
 import SwiftUI
 
-/// Sign-in to the IronMan Project platform, sync/restore, and the usage-statistics opt-out.
+/// The platform account (signing in happens on `LoginView`), syncing, signing out — which syncs
+/// first and then erases this iPhone's data — and the usage-statistics opt-out.
 struct PlatformSyncView: View {
     @Environment(DataStore.self) private var store
     @Environment(HealthKitManager.self) private var healthKit
     @Environment(PlatformSyncManager.self) private var platformSync
 
-    @State private var email = ""
-    @State private var password = ""
-    @State private var isSigningIn = false
     @State private var analyticsEnabled = AppAnalytics.isEnabled
-    @State private var showRestoreConfirmation = false
-    @State private var showServerBackupChoice = false
-    @State private var showReplaceConfirmation = false
+    @State private var showSignOutConfirmation = false
+    @State private var signOutFailure: String?
     @State private var errorMessage: String?
 
     private var client: SupabaseClient { platformSync.client }
 
     var body: some View {
-        @Bindable var platformSync = platformSync
         Form {
             if !platformSync.isAvailable {
                 Section {
@@ -32,17 +28,16 @@ struct PlatformSyncView: View {
                 Section {
                     LabeledContent("Conta", value: session.email ?? "—")
                     Button("Terminar Sessão", role: .destructive) {
-                        Task { await client.signOut() }
+                        showSignOutConfirmation = true
                     }
+                    .disabled(platformSync.isBusy)
                 } header: {
                     Text("Plataforma IronMan Project")
                 } footer: {
-                    Text("Ligado a \(client.config?.url.host() ?? "—") como atleta.")
+                    Text("Ligado a \(client.config?.url.host() ?? "—") como atleta. Ao terminar sessão, tudo é sincronizado e os dados deste iPhone são apagados — ficam na plataforma e voltam ao iniciar sessão.")
                 }
 
                 syncSection
-            } else {
-                signInSection
             }
 
             Section {
@@ -58,24 +53,17 @@ struct PlatformSyncView: View {
         }
         .navigationTitle("Plataforma")
         .trackScreen("Plataforma")
-        .confirmationDialog("Restaurar da plataforma?", isPresented: $showRestoreConfirmation, titleVisibility: .visible) {
-            Button("Restaurar", role: .destructive) { Task { await restore() } }
+        .confirmationDialog("Terminar sessão?", isPresented: $showSignOutConfirmation, titleVisibility: .visible) {
+            Button("Terminar Sessão", role: .destructive) { Task { await signOut(discardingUnsynced: false) } }
             Button("Cancelar", role: .cancel) {}
         } message: {
-            Text("A base de dados atual é substituída pelo backup da plataforma e fica guardada como backup local. Os dados da app Saúde não são afetados.")
+            Text("Primeiro é tudo enviado para a plataforma; depois os dados deste iPhone são apagados. Os dados da app Saúde não são afetados.")
         }
-        .confirmationDialog("Já existe um backup na plataforma", isPresented: $showServerBackupChoice, titleVisibility: .visible) {
-            Button("Restaurar da Plataforma") { Task { await restore() } }
-            Button("Substituir pelos Dados deste iPhone", role: .destructive) { showReplaceConfirmation = true }
+        .alert("Não foi possível sincronizar", isPresented: Binding(get: { signOutFailure != nil }, set: { if !$0 { signOutFailure = nil } })) {
+            Button("Sair e Perder Alterações", role: .destructive) { Task { await signOut(discardingUnsynced: true) } }
             Button("Cancelar", role: .cancel) {}
         } message: {
-            Text("Este iPhone ainda não sincronizou, mas a plataforma já tem um backup desta app (de outro iPhone ou de uma instalação anterior).")
-        }
-        .alert("Substituir o backup da plataforma?", isPresented: $showReplaceConfirmation) {
-            Button("Substituir", role: .destructive) { Task { await sync(replacingServerBackup: true) } }
-            Button("Cancelar", role: .cancel) {}
-        } message: {
-            Text("Os registos que estão na plataforma e não existem neste iPhone são apagados de lá (ficam marcados como apagados).")
+            Text("\(signOutFailure ?? "")\n\nSe saíres mesmo assim, as alterações deste iPhone que ainda não chegaram à plataforma perdem-se.")
         }
         .alert("Erro", isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
             Button("OK", role: .cancel) {}
@@ -84,49 +72,12 @@ struct PlatformSyncView: View {
         }
     }
 
-    private var signInSection: some View {
-        Section {
-            TextField("Email", text: $email)
-                .textContentType(.username)
-                .autocorrectionDisabled()
-                #if os(iOS)
-                .keyboardType(.emailAddress)
-                .textInputAutocapitalization(.never)
-                #endif
-            SecureField("Palavra-passe", text: $password)
-                .textContentType(.password)
-            Button {
-                Task { await signIn() }
-            } label: {
-                HStack {
-                    Text("Iniciar Sessão")
-                    if isSigningIn {
-                        Spacer()
-                        ProgressView()
-                    }
-                }
-            }
-            .disabled(email.isEmpty || password.isEmpty || isSigningIn)
-        } header: {
-            Text("Plataforma IronMan Project")
-        } footer: {
-            Text("Usa a tua conta de atleta da plataforma (a mesma do dashboard). Depois, o diário, o catálogo, os planos alimentares e os dados da app Saúde passam a ser sincronizados com o dashboard da nutricionista e do treinador.")
-        }
-    }
-
     private var syncSection: some View {
-        @Bindable var platformSync = platformSync
-        return Section {
-            Toggle("Sincronização automática", isOn: $platformSync.autoSyncEnabled)
+        Section {
             Button {
                 Task { await sync() }
             } label: {
                 Label("Sincronizar Agora", systemImage: "arrow.triangle.2.circlepath")
-            }
-            Button(role: .destructive) {
-                showRestoreConfirmation = true
-            } label: {
-                Label("Restaurar da Plataforma", systemImage: "icloud.and.arrow.down")
             }
         } header: {
             HStack {
@@ -138,7 +89,7 @@ struct PlatformSyncView: View {
             }
         } footer: {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Com a sincronização automática, as alterações são enviadas quando abres e quando sais da app. Os planos alimentares editados no dashboard chegam aqui na sincronização seguinte.")
+                Text("A app sincroniza sozinha quando abres e quando sais dela, para o dashboard ter sempre os teus dados. O que mudares no dashboard chega aqui na sincronização seguinte.")
                 if let lastSync = platformSync.lastSync {
                     Text("Última sincronização: \(lastSync.formatted(date: .abbreviated, time: .shortened))")
                 } else {
@@ -158,36 +109,21 @@ struct PlatformSyncView: View {
         .disabled(platformSync.isBusy)
     }
 
-    private func signIn() async {
-        isSigningIn = true
-        defer { isSigningIn = false }
+    private func sync() async {
         do {
-            try await client.signIn(email: email.trimmingCharacters(in: .whitespaces), password: password)
-            password = ""
-            await sync()
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-    }
-
-    private func sync(replacingServerBackup: Bool = false) async {
-        do {
-            try await platformSync.sync(store: store, healthKit: healthKit, replacingServerBackup: replacingServerBackup)
+            try await platformSync.sync(store: store, healthKit: healthKit)
             Haptics.success()
-        } catch PlatformSyncError.serverHasBackup {
-            showServerBackupChoice = true
         } catch {
             errorMessage = error.localizedDescription
         }
     }
 
-    private func restore() async {
+    private func signOut(discardingUnsynced: Bool) async {
         do {
-            try await platformSync.restore(into: store)
-            // Sends anything the backup didn't have yet (Apple Health, pending events).
-            await sync()
+            try await platformSync.signOutErasingData(store: store, healthKit: healthKit, discardingUnsynced: discardingUnsynced)
+            AppAnalytics.log(.platformSignOut)
         } catch {
-            errorMessage = error.localizedDescription
+            signOutFailure = error.localizedDescription
         }
     }
 }

@@ -20,7 +20,9 @@ struct FoodItemEditorView: View {
 
     @State private var name = ""
     @State private var photoID: UUID?
+    @State private var labelPhotoIDs: [UUID] = []
     @State private var brand = ""
+    @State private var categoryID: UUID?
     @State private var unit: MeasurementUnit = .gram
     @State private var doseSizeText = "100"
     @State private var nutritionBasis: NutritionBasis = .per100
@@ -28,14 +30,18 @@ struct FoodItemEditorView: View {
     @State private var proteinText = ""
     @State private var carbsText = ""
     @State private var fatText = ""
+    @State private var saturatedFatText = ""
+    @State private var sugarsText = ""
+    @State private var fiberText = ""
+    @State private var saltText = ""
+    @State private var micronutrients: [Micronutrient: Double] = [:]
     @State private var barcodes: [String] = []
     @State private var showScanner = false
     @State private var prices: [PriceEntry] = []
     @State private var showingAddPrice = false
 
-    @State private var showMinerals = false
+    /// Free-text vitamins/minerals from before the fixed list that it doesn't recognise.
     @State private var minerals: [NutrientValue] = []
-    @State private var showVitamins = false
     @State private var vitamins: [NutrientValue] = []
 
     @State private var showingJSONImport = false
@@ -50,6 +56,30 @@ struct FoodItemEditorView: View {
         self.initialBarcode = initialBarcode
         self.dismissesAfterSave = dismissesAfterSave
         self.onSave = onSave
+    }
+
+    /// The label fields, edited together.
+    private var labelText: Binding<LabelNutritionText> {
+        Binding(
+            get: {
+                LabelNutritionText(calories: caloriesText, fat: fatText, saturatedFat: saturatedFatText, carbs: carbsText,
+                                   sugars: sugarsText, fiber: fiberText, protein: proteinText, salt: saltText)
+            },
+            set: { text in
+                caloriesText = text.calories
+                fatText = text.fat
+                saturatedFatText = text.saturatedFat
+                carbsText = text.carbs
+                sugarsText = text.sugars
+                fiberText = text.fiber
+                proteinText = text.protein
+                saltText = text.salt
+            }
+        )
+    }
+
+    private var basisDescription: String {
+        nutritionBasis == .per100 ? "por \(per100Label)" : "por dose"
     }
 
     private var isValid: Bool {
@@ -72,11 +102,18 @@ struct FoodItemEditorView: View {
                 Section("Foto") {
                     PhotoPickerField(photoID: $photoID)
                 }
+                NutritionLabelPhotosSection(photoIDs: $labelPhotoIDs)
                 #endif
 
                 Section("Alimento") {
                     TextField("Nome", text: $name)
                     TextField("Marca (opcional)", text: $brand)
+                    Picker("Categoria", selection: $categoryID) {
+                        Text("Sem categoria").tag(UUID?.none)
+                        ForEach(store.foodCategories) { category in
+                            Text(category.name).tag(UUID?.some(category.id))
+                        }
+                    }
                     Picker("Unidade", selection: $unit) {
                         ForEach(MeasurementUnit.allCases) { measurementUnit in
                             Text(measurementUnit.shortLabel).tag(measurementUnit)
@@ -101,33 +138,25 @@ struct FoodItemEditorView: View {
                     }
                     .pickerStyle(.segmented)
 
-                    TextField("Calorias (kcal)", text: $caloriesText)
-                        .keyboardType(.numberPad)
-                    TextField("Proteína (g)", text: $proteinText)
-                        .keyboardType(.decimalPad)
-                    TextField("Hidratos de Carbono (g)", text: $carbsText)
-                        .keyboardType(.decimalPad)
-                    TextField("Gordura (g)", text: $fatText)
-                        .keyboardType(.decimalPad)
+                    LabelNutritionFields(text: labelText)
                 } header: {
-                    Text("Macros")
+                    Text("Declaração Nutricional")
                 } footer: {
                     Text(nutritionBasis == .per100
                         ? "Valores tal como aparecem no rótulo, por \(per100Label)."
                         : "Valores para uma dose de \(doseSizeText.isEmpty ? "?" : doseSizeText) \(unit.shortLabel).")
                 }
 
-                Section {
-                    Toggle("Minerais", isOn: $showMinerals.animation())
-                    if showMinerals {
-                        nutrientRows($minerals)
-                    }
-                }
+                MicronutrientsSection(values: $micronutrients, basis: basisDescription)
 
-                Section {
-                    Toggle("Vitaminas", isOn: $showVitamins.animation())
-                    if showVitamins {
+                if !minerals.isEmpty || !vitamins.isEmpty {
+                    Section {
+                        nutrientRows($minerals)
                         nutrientRows($vitamins)
+                    } header: {
+                        Text("Outros Nutrientes")
+                    } footer: {
+                        Text("Registados antes da lista fixa e que ela não reconhece. Desliza para remover.")
                     }
                 }
 
@@ -249,17 +278,6 @@ struct FoodItemEditorView: View {
             }
         }
         .onDelete { offsets in values.wrappedValue.remove(atOffsets: offsets) }
-        .onAppear {
-            if values.wrappedValue.isEmpty {
-                values.wrappedValue.append(NutrientValue(name: "", amount: 0, unit: "mg"))
-            }
-        }
-
-        Button {
-            values.wrappedValue.append(NutrientValue(name: "", amount: 0, unit: "mg"))
-        } label: {
-            Label("Adicionar", systemImage: "plus")
-        }
     }
 
     /// Applies AI-provided JSON to this form: the first food fills the fields for review before
@@ -283,17 +301,14 @@ struct FoodItemEditorView: View {
         proteinText = payload.protein.map { String($0) } ?? ""
         carbsText = payload.carbs.map { String($0) } ?? ""
         fatText = payload.fat.map { String($0) } ?? ""
-
-        let newMinerals = (payload.minerals ?? []).map { $0.makeNutrientValue() }
-        if !newMinerals.isEmpty {
-            minerals = newMinerals
-            showMinerals = true
-        }
-        let newVitamins = (payload.vitamins ?? []).map { $0.makeNutrientValue() }
-        if !newVitamins.isEmpty {
-            vitamins = newVitamins
-            showVitamins = true
-        }
+        let imported = payload.makeFoodItem()
+        saturatedFatText = LabelNutritionText.text(imported.saturatedFat)
+        sugarsText = LabelNutritionText.text(imported.sugars)
+        fiberText = LabelNutritionText.text(imported.fiber)
+        saltText = LabelNutritionText.text(imported.salt)
+        if !imported.micronutrients.isEmpty { micronutrients = imported.micronutrients.typedMicronutrients }
+        if !imported.minerals.isEmpty { minerals = imported.minerals }
+        if !imported.vitamins.isEmpty { vitamins = imported.vitamins }
     }
 
     private func formatted(_ value: Double) -> String {
@@ -309,7 +324,9 @@ struct FoodItemEditorView: View {
         }
         name = item.name
         photoID = item.photoID
+        labelPhotoIDs = item.labelPhotoIDs
         brand = item.brand ?? ""
+        categoryID = item.categoryID
         unit = item.unit
         doseSizeText = formatted(item.doseSize)
         nutritionBasis = item.nutritionBasis
@@ -317,22 +334,25 @@ struct FoodItemEditorView: View {
         proteinText = item.protein.map { String($0) } ?? ""
         carbsText = item.carbs.map { String($0) } ?? ""
         fatText = item.fat.map { String($0) } ?? ""
+        saturatedFatText = LabelNutritionText.text(item.saturatedFat)
+        sugarsText = LabelNutritionText.text(item.sugars)
+        fiberText = LabelNutritionText.text(item.fiber)
+        saltText = LabelNutritionText.text(item.salt)
+        micronutrients = item.micronutrients.typedMicronutrients
         barcodes = item.barcodes
         prices = item.prices
         minerals = item.minerals
-        showMinerals = !item.minerals.isEmpty
         vitamins = item.vitamins
-        showVitamins = !item.vitamins.isEmpty
     }
 
     private func save() {
         guard let calories = Int(caloriesText),
               let doseSize = Double(doseSizeText.replacingOccurrences(of: ",", with: ".")) else { return }
         let trimmedBrand = brand.trimmingCharacters(in: .whitespaces)
-        let cleanedMinerals = showMinerals ? minerals.filter { !$0.name.trimmingCharacters(in: .whitespaces).isEmpty } : []
-        let cleanedVitamins = showVitamins ? vitamins.filter { !$0.name.trimmingCharacters(in: .whitespaces).isEmpty } : []
+        let cleanedMinerals = minerals.filter { !$0.name.trimmingCharacters(in: .whitespaces).isEmpty }
+        let cleanedVitamins = vitamins.filter { !$0.name.trimmingCharacters(in: .whitespaces).isEmpty }
 
-        let item = FoodItem(
+        var item = FoodItem(
             id: itemToEdit?.id ?? UUID(),
             name: name.trimmingCharacters(in: .whitespaces),
             brand: trimmedBrand.isEmpty ? nil : trimmedBrand,
@@ -340,17 +360,27 @@ struct FoodItemEditorView: View {
             doseSize: doseSize,
             nutritionBasis: nutritionBasis,
             calories: calories,
-            protein: Double(proteinText),
-            carbs: Double(carbsText),
-            fat: Double(fatText),
+            protein: LabelNutritionText.number(proteinText),
+            carbs: LabelNutritionText.number(carbsText),
+            fat: LabelNutritionText.number(fatText),
             minerals: cleanedMinerals,
             vitamins: cleanedVitamins,
             barcodes: barcodes,
             prices: prices,
             isFavorite: itemToEdit?.isFavorite ?? false,
             createdAt: itemToEdit?.createdAt ?? Date(),
-            photoID: photoID
+            photoID: photoID,
+            categoryID: categoryID
         )
+        item.labelPhotoIDs = labelPhotoIDs
+        item.saturatedFat = LabelNutritionText.number(saturatedFatText)
+        item.sugars = LabelNutritionText.number(sugarsText)
+        item.fiber = LabelNutritionText.number(fiberText)
+        item.salt = LabelNutritionText.number(saltText)
+        // Keep keys this version doesn't know (written by a newer app or the dashboard).
+        var storedMicros = (itemToEdit?.micronutrients ?? [:]).filter { Micronutrient(rawValue: $0.key) == nil }
+        storedMicros.merge(micronutrients.stored) { _, new in new }
+        item.micronutrients = storedMicros
         if itemToEdit == nil {
             store.addFoodItem(item)
         } else {

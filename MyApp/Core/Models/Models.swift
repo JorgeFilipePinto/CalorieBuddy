@@ -50,6 +50,58 @@ struct FoodEntry: Identifiable, Codable, Equatable {
     /// as belonging together (e.g. shown with the recipe's name).
     var groupID: UUID? = nil
     var groupName: String? = nil
+    /// The rest of the label for what was eaten (absolute amounts; `nil` = not stated).
+    var saturatedFat: Double? = nil
+    var sugars: Double? = nil
+    var fiber: Double? = nil
+    var salt: Double? = nil
+    /// `[Micronutrient.rawValue: amount]`, in each nutrient's unit.
+    var micronutrients: [String: Double]? = nil
+    /// The catalog food this was logged from and how many of its doses — while set, editing that
+    /// food rewrites this entry's values (one source of truth). `nil` = typed in by hand.
+    var foodItemID: UUID? = nil
+    var quantity: Double? = nil
+    /// The recipe this was logged from (as part of `groupID`): editing the recipe regenerates the
+    /// group. `nil` when logged otherwise (including a meal-plan option with swapped foods).
+    var recipeID: UUID? = nil
+
+    var nutrition: NutritionAmounts {
+        NutritionAmounts(
+            calories: Double(calories),
+            protein: protein,
+            carbs: carbs,
+            sugars: sugars,
+            fat: fat,
+            saturatedFat: saturatedFat,
+            fiber: fiber,
+            salt: salt,
+            micronutrients: (micronutrients ?? [:]).typedMicronutrients
+        )
+    }
+
+    /// Sets everything but energy and the three macros from `nutrition`.
+    var extraNutrition: NutritionAmounts {
+        get { nutrition }
+        set {
+            saturatedFat = newValue.saturatedFat
+            sugars = newValue.sugars
+            fiber = newValue.fiber
+            salt = newValue.salt
+            micronutrients = newValue.micronutrients.isEmpty ? nil : newValue.micronutrients.stored
+        }
+    }
+}
+
+extension FoodEntry {
+    /// An entry for `nutrition` (e.g. a scaled catalog food). In an extension so the memberwise
+    /// initializer stays available.
+    init(name: String, nutrition: NutritionAmounts, mealType: MealType, date: Date, barcode: String? = nil,
+         groupID: UUID? = nil, groupName: String? = nil) {
+        self.init(name: name, calories: Int(nutrition.calories.rounded()), protein: nutrition.protein,
+                  carbs: nutrition.carbs, fat: nutrition.fat, mealType: mealType, date: date, barcode: barcode,
+                  groupID: groupID, groupName: groupName)
+        extraNutrition = nutrition
+    }
 }
 
 /// A place where a food item can be bought, and at what price.
@@ -254,6 +306,13 @@ extension Array where Element: Favoritable {
 /// Uses a custom decoder so that catalog items saved before `unit`/`doseSize`/`nutritionBasis`/
 /// `minerals`/`vitamins`/`isFavorite`/`createdAt` existed still import cleanly, with sensible
 /// defaults.
+/// A user-editable group for catalog foods (e.g. "Proteína", "Hidratos de carbono", "Gordura
+/// saturada"), so the catalog can be browsed by what each food is for.
+struct FoodCategory: Identifiable, Codable, Hashable {
+    var id: UUID = UUID()
+    var name: String
+}
+
 struct FoodItem: Identifiable, Codable, Hashable, Doseable, Favoritable {
     var id: UUID
     var name: String
@@ -268,8 +327,17 @@ struct FoodItem: Identifiable, Codable, Hashable, Doseable, Favoritable {
     var protein: Double?
     var carbs: Double?
     var fat: Double?
+    /// Free-text minerals/vitamins from before `micronutrients`: only names the fixed list doesn't
+    /// know stay here (the rest move to `micronutrients` when decoded).
     var minerals: [NutrientValue]
     var vitamins: [NutrientValue]
+    /// The rest of the nutrition label, on the same basis as the macros (grams; `micronutrients`
+    /// as `[Micronutrient.rawValue: amount]` in each nutrient's unit). `nil` = not stated.
+    var saturatedFat: Double?
+    var sugars: Double?
+    var fiber: Double?
+    var salt: Double?
+    var micronutrients: [String: Double] = [:]
     /// Every barcode that identifies this item — lets near-identical variants of the same
     /// product (different pack sizes, regional printings, minor recipe tweaks) share one
     /// catalog entry instead of being duplicated.
@@ -280,6 +348,10 @@ struct FoodItem: Identifiable, Codable, Hashable, Doseable, Favoritable {
     var createdAt: Date
     /// The item's photo in `PhotoStore` (`nil` = none).
     var photoID: UUID?
+    /// Photos of its nutrition label, in `PhotoStore` (front, back…), for checking the values.
+    var labelPhotoIDs: [UUID] = []
+    /// Its `FoodCategory` (`nil` = uncategorised).
+    var categoryID: UUID?
 
     init(
         id: UUID = UUID(),
@@ -298,7 +370,8 @@ struct FoodItem: Identifiable, Codable, Hashable, Doseable, Favoritable {
         prices: [PriceEntry] = [],
         isFavorite: Bool = false,
         createdAt: Date = Date(),
-        photoID: UUID? = nil
+        photoID: UUID? = nil,
+        categoryID: UUID? = nil
     ) {
         self.id = id
         self.name = name
@@ -317,11 +390,13 @@ struct FoodItem: Identifiable, Codable, Hashable, Doseable, Favoritable {
         self.isFavorite = isFavorite
         self.createdAt = createdAt
         self.photoID = photoID
+        self.categoryID = categoryID
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, name, brand, unit, doseSize, nutritionBasis, calories, protein, carbs, fat,
-             minerals, vitamins, barcodes, prices, isFavorite, createdAt, photoID
+             minerals, vitamins, barcodes, prices, isFavorite, createdAt, photoID, categoryID, labelPhotoIDs,
+             saturatedFat, sugars, fiber, salt, micronutrients
     }
 
     /// Only for reading the old singular `barcode` field from databases saved before this was
@@ -344,6 +419,16 @@ struct FoodItem: Identifiable, Codable, Hashable, Doseable, Favoritable {
         fat = try container.decodeIfPresent(Double.self, forKey: .fat)
         minerals = try container.decodeIfPresent([NutrientValue].self, forKey: .minerals) ?? []
         vitamins = try container.decodeIfPresent([NutrientValue].self, forKey: .vitamins) ?? []
+        saturatedFat = try container.decodeIfPresent(Double.self, forKey: .saturatedFat)
+        sugars = try container.decodeIfPresent(Double.self, forKey: .sugars)
+        fiber = try container.decodeIfPresent(Double.self, forKey: .fiber)
+        salt = try container.decodeIfPresent(Double.self, forKey: .salt)
+        micronutrients = try container.decodeIfPresent([String: Double].self, forKey: .micronutrients) ?? [:]
+        // Free-text vitamins/minerals the fixed list knows move to `micronutrients`.
+        var micros = micronutrients
+        minerals = Self.adopt(minerals, into: &micros)
+        vitamins = Self.adopt(vitamins, into: &micros)
+        micronutrients = micros
         // `barcodes` (plural, current) takes priority; fall back to the old singular `barcode`.
         if let list = try container.decodeIfPresent([String].self, forKey: .barcodes) {
             barcodes = list
@@ -357,6 +442,19 @@ struct FoodItem: Identifiable, Codable, Hashable, Doseable, Favoritable {
         isFavorite = try container.decodeIfPresent(Bool.self, forKey: .isFavorite) ?? false
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? .distantPast
         photoID = try container.decodeIfPresent(UUID.self, forKey: .photoID)
+        categoryID = try container.decodeIfPresent(UUID.self, forKey: .categoryID)
+        labelPhotoIDs = try container.decodeIfPresent([UUID].self, forKey: .labelPhotoIDs) ?? []
+    }
+
+    /// Moves the free-text `values` the fixed list knows into `micros` (in their own unit) and
+    /// returns the ones it doesn't.
+    static func adopt(_ values: [NutrientValue], into micros: inout [String: Double]) -> [NutrientValue] {
+        values.filter { value in
+            guard let nutrient = Micronutrient.matching(value.name),
+                  let amount = nutrient.convert(value.amount, from: value.unit) else { return true }
+            micros[nutrient.rawValue, default: 0] += amount
+            return false
+        }
     }
 
     /// Multiplier turning the stored nutrition values into "nutrition for one dose".
@@ -374,6 +472,21 @@ struct FoodItem: Identifiable, Codable, Hashable, Doseable, Favoritable {
     func scaledProtein(quantity: Double) -> Double? { protein.map { $0 * nutritionScale * quantity } }
     func scaledCarbs(quantity: Double) -> Double? { carbs.map { $0 * nutritionScale * quantity } }
     func scaledFat(quantity: Double) -> Double? { fat.map { $0 * nutritionScale * quantity } }
+
+    /// Everything in `quantity` doses.
+    func nutrition(quantity: Double) -> NutritionAmounts {
+        NutritionAmounts(
+            calories: Double(calories),
+            protein: protein,
+            carbs: carbs,
+            sugars: sugars,
+            fat: fat,
+            saturatedFat: saturatedFat,
+            fiber: fiber,
+            salt: salt,
+            micronutrients: micronutrients.typedMicronutrients
+        ).scaled(by: nutritionScale * quantity)
+    }
 }
 
 /// The nutrient two foods are matched on when one is swapped for an "equivalent" other.
@@ -509,10 +622,19 @@ struct Supplement: Identifiable, Codable, Hashable, Doseable, Favoritable {
     var totalSize: Double
     /// Amount of one dose, in `unit`.
     var doseSize: Double
+    /// Whether the nutrition values are per 100 (g/ml) or per one dose (older supplements: per dose).
+    var nutritionBasis: NutritionBasis = .perDose
     var calories: Int?
     var protein: Double?
     var carbs: Double?
     var fat: Double?
+    /// The rest of the nutrition label, on the same basis as the macros (grams; `micronutrients`
+    /// as `[Micronutrient.rawValue: amount]` in each nutrient's unit). `nil` = not stated.
+    var saturatedFat: Double?
+    var sugars: Double?
+    var fiber: Double?
+    var salt: Double?
+    var micronutrients: [String: Double] = [:]
     var prices: [PriceEntry]
     var stocks: [SupplementStock]
     /// Once a stock's remaining amount drops to or below this (in `unit`), it needs restocking.
@@ -521,6 +643,10 @@ struct Supplement: Identifiable, Codable, Hashable, Doseable, Favoritable {
     var createdAt: Date
     /// The supplement's photo in `PhotoStore` (`nil` = none).
     var photoID: UUID?
+    /// Barcodes of its packages: scanning one from a day's "+" logs this supplement.
+    var barcodes: [String]
+    /// Photos of its nutrition label, in `PhotoStore` (front, back…), for checking the values.
+    var labelPhotoIDs: [UUID] = []
 
     init(
         id: UUID = UUID(),
@@ -538,7 +664,8 @@ struct Supplement: Identifiable, Codable, Hashable, Doseable, Favoritable {
         lowStockThreshold: Double? = nil,
         isFavorite: Bool = false,
         createdAt: Date = Date(),
-        photoID: UUID? = nil
+        photoID: UUID? = nil,
+        barcodes: [String] = []
     ) {
         self.id = id
         self.name = name
@@ -556,11 +683,13 @@ struct Supplement: Identifiable, Codable, Hashable, Doseable, Favoritable {
         self.isFavorite = isFavorite
         self.createdAt = createdAt
         self.photoID = photoID
+        self.barcodes = barcodes
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, name, categoryID, unit, totalSize, doseSize, calories, protein, carbs, fat,
-             prices, stocks, lowStockThreshold, isFavorite, createdAt, photoID
+             prices, stocks, lowStockThreshold, isFavorite, createdAt, photoID, barcodes, labelPhotoIDs,
+             nutritionBasis, saturatedFat, sugars, fiber, salt, micronutrients
     }
 
     init(from decoder: Decoder) throws {
@@ -584,15 +713,52 @@ struct Supplement: Identifiable, Codable, Hashable, Doseable, Favoritable {
         isFavorite = try container.decodeIfPresent(Bool.self, forKey: .isFavorite) ?? false
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? .distantPast
         photoID = try container.decodeIfPresent(UUID.self, forKey: .photoID)
+        barcodes = try container.decodeIfPresent([String].self, forKey: .barcodes) ?? []
+        labelPhotoIDs = try container.decodeIfPresent([UUID].self, forKey: .labelPhotoIDs) ?? []
+        nutritionBasis = try container.decodeIfPresent(NutritionBasis.self, forKey: .nutritionBasis) ?? .perDose
+        saturatedFat = try container.decodeIfPresent(Double.self, forKey: .saturatedFat)
+        sugars = try container.decodeIfPresent(Double.self, forKey: .sugars)
+        fiber = try container.decodeIfPresent(Double.self, forKey: .fiber)
+        salt = try container.decodeIfPresent(Double.self, forKey: .salt)
+        micronutrients = try container.decodeIfPresent([String: Double].self, forKey: .micronutrients) ?? [:]
+    }
+
+    /// Multiplier turning the stored nutrition values into "nutrition for one dose".
+    private var nutritionScale: Double {
+        switch nutritionBasis {
+        case .perDose: return 1
+        case .per100: return (doseSize * unit.baseMultiplier) / 100
+        }
     }
 
     /// Number of doses the whole package yields, for information/display only.
     var doseCount: Double { doseSize > 0 ? totalSize / doseSize : 0 }
 
-    func scaledCalories(quantity: Double) -> Int { Int((Double(calories ?? 0) * quantity).rounded()) }
-    func scaledProtein(quantity: Double) -> Double? { protein.map { $0 * quantity } }
-    func scaledCarbs(quantity: Double) -> Double? { carbs.map { $0 * quantity } }
-    func scaledFat(quantity: Double) -> Double? { fat.map { $0 * quantity } }
+    /// What's left across every stock location, in `unit` (logging a dose from a stock lowers it).
+    var totalRemaining: Double { stocks.reduce(0) { $0 + $1.remaining } }
+
+    /// How many doses `amount` (in `unit`) holds.
+    func doses(in amount: Double) -> Double { doseSize > 0 ? amount / doseSize : 0 }
+
+    func scaledCalories(quantity: Double) -> Int { Int((Double(calories ?? 0) * nutritionScale * quantity).rounded()) }
+    func scaledProtein(quantity: Double) -> Double? { protein.map { $0 * nutritionScale * quantity } }
+    func scaledCarbs(quantity: Double) -> Double? { carbs.map { $0 * nutritionScale * quantity } }
+    func scaledFat(quantity: Double) -> Double? { fat.map { $0 * nutritionScale * quantity } }
+
+    /// Everything in `quantity` doses.
+    func nutrition(quantity: Double) -> NutritionAmounts {
+        NutritionAmounts(
+            calories: Double(calories ?? 0),
+            protein: protein,
+            carbs: carbs,
+            sugars: sugars,
+            fat: fat,
+            saturatedFat: saturatedFat,
+            fiber: fiber,
+            salt: salt,
+            micronutrients: micronutrients.typedMicronutrients
+        ).scaled(by: nutritionScale * quantity)
+    }
 }
 
 /// One logged consumption of a supplement — `quantity` is in doses (e.g. 1.5 = one and a half).
@@ -624,6 +790,8 @@ struct Recipe: Identifiable, Codable, Equatable, Favoritable {
     var createdAt: Date
     /// The recipe's photo in `PhotoStore` (`nil` = none).
     var photoID: UUID?
+    /// Photos of its nutrition label, in `PhotoStore` (front, back…), for checking the values.
+    var labelPhotoIDs: [UUID] = []
 
     init(id: UUID = UUID(), name: String, items: [RecipeItem], isFavorite: Bool = false, createdAt: Date = Date(), photoID: UUID? = nil) {
         self.id = id
@@ -635,7 +803,7 @@ struct Recipe: Identifiable, Codable, Equatable, Favoritable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, items, isFavorite, createdAt, photoID
+        case id, name, items, isFavorite, createdAt, photoID, labelPhotoIDs
     }
 
     init(from decoder: Decoder) throws {
@@ -646,6 +814,7 @@ struct Recipe: Identifiable, Codable, Equatable, Favoritable {
         isFavorite = try container.decodeIfPresent(Bool.self, forKey: .isFavorite) ?? false
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? .distantPast
         photoID = try container.decodeIfPresent(UUID.self, forKey: .photoID)
+        labelPhotoIDs = try container.decodeIfPresent([UUID].self, forKey: .labelPhotoIDs) ?? []
     }
 }
 
@@ -1104,6 +1273,7 @@ struct AppDatabase: Codable {
     var settings: UserSettings
     var entries: [FoodEntry]
     var foodItems: [FoodItem]
+    var foodCategories: [FoodCategory]
     var recipes: [Recipe]
     var stores: [Store]
     var supplementCategories: [SupplementCategory]
@@ -1130,13 +1300,15 @@ struct AppDatabase: Codable {
         mealPlans: [MealPlan] = [],
         nutritionPlans: [NutritionPlan] = [],
         bodyMeasurements: [BodyMeasurement] = [],
-        progressPhotos: [ProgressPhoto] = []
+        progressPhotos: [ProgressPhoto] = [],
+        foodCategories: [FoodCategory] = []
     ) {
         self.version = version
         self.exportedAt = exportedAt
         self.settings = settings
         self.entries = entries
         self.foodItems = foodItems
+        self.foodCategories = foodCategories
         self.recipes = recipes
         self.stores = stores
         self.supplementCategories = supplementCategories
@@ -1152,7 +1324,7 @@ struct AppDatabase: Codable {
     private enum CodingKeys: String, CodingKey {
         case version, exportedAt, settings, entries, foodItems, recipes, stores,
              supplementCategories, supplements, supplementLogs, stockLocations, mealPlans, nutritionPlans,
-             bodyMeasurements, progressPhotos
+             bodyMeasurements, progressPhotos, foodCategories
     }
 
     /// Databases written before several meal plans existed had at most one, under `mealPlan`.
@@ -1167,6 +1339,7 @@ struct AppDatabase: Codable {
         settings = try container.decode(UserSettings.self, forKey: .settings)
         entries = try container.decode([FoodEntry].self, forKey: .entries)
         foodItems = try container.decodeIfPresent([FoodItem].self, forKey: .foodItems) ?? []
+        foodCategories = try container.decodeIfPresent([FoodCategory].self, forKey: .foodCategories) ?? []
         recipes = try container.decodeIfPresent([Recipe].self, forKey: .recipes) ?? []
         stores = try container.decodeIfPresent([Store].self, forKey: .stores) ?? []
         supplementCategories = try container.decodeIfPresent([SupplementCategory].self, forKey: .supplementCategories) ?? []

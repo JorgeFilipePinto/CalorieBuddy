@@ -137,7 +137,7 @@ struct AddEntryView: View {
         let fat = Double(fatText)
         let trimmedName = name.trimmingCharacters(in: .whitespaces)
 
-        let entry = FoodEntry(
+        var entry = FoodEntry(
             id: entryToEdit?.id ?? UUID(),
             name: trimmedName,
             calories: calories,
@@ -150,6 +150,18 @@ struct AddEntryView: View {
             groupID: entryToEdit?.groupID,
             groupName: entryToEdit?.groupName
         )
+        // This form edits energy and the macros only: keep the rest of what was logged.
+        if let entryToEdit {
+            entry.extraNutrition = entryToEdit.nutrition
+            // Still the catalog food's values (only the meal or time changed): keep following it.
+            // Values typed over by hand stop following the food.
+            if entry.calories == entryToEdit.calories, entry.protein == entryToEdit.protein,
+               entry.carbs == entryToEdit.carbs, entry.fat == entryToEdit.fat {
+                entry.foodItemID = entryToEdit.foodItemID
+                entry.quantity = entryToEdit.quantity
+                entry.recipeID = entryToEdit.recipeID
+            }
+        }
         if entryToEdit == nil {
             store.addEntry(entry)
             AppAnalytics.log(.entryLogged(source: barcode == nil ? .manual : .barcode, mealType: mealType))

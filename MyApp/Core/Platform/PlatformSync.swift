@@ -10,6 +10,8 @@ enum PlatformSyncError: LocalizedError {
     /// reinstall): syncing now would replace it, so the user has to choose.
     case serverHasBackup
     case noServerBackup
+    /// A document from the platform the app can't decode (skipped, reported as a warning).
+    case unreadableDocument
 
     var errorDescription: String? {
         switch self {
@@ -17,6 +19,8 @@ enum PlatformSyncError: LocalizedError {
             return "Já existe um backup desta app na plataforma. Restaura-o primeiro, ou escolhe substituí-lo pelos dados deste iPhone."
         case .noServerBackup:
             return "Ainda não existe nenhum backup desta app na plataforma."
+        case .unreadableDocument:
+            return "Um registo da plataforma não está num formato que a app consiga ler."
         }
     }
 }
@@ -29,7 +33,10 @@ enum PlatformSyncError: LocalizedError {
 /// 1. **Nutrition plans, both ways** — pulls the plans (the nutritionist edits them on the
 ///    dashboard), then pushes local changes through `save_nutrition_plan()`. A plan changed on
 ///    both sides keeps the most recent edit.
-/// 2. **App data, up** — every record of the app database (except the plans) goes to
+/// 2. **App data, down** — the `app_documents` changed since the last pull (the athlete edits the
+///    diary and the catalog on the dashboard too) are merged in: the platform's version wins
+///    unless the app changed the same record since the last sync — then the app's wins.
+/// 2b. **App data, up** — every record of the app database (except the plans) goes to
 ///    `app_documents` as the app encodes it, a lossless backup to restore from; the diary and the
 ///    catalog also go to the typed `food_entries` / `food_items` the dashboard reads. Only records
 ///    whose hash changed since the last sync are sent; records deleted locally are soft-deleted.
@@ -38,7 +45,6 @@ enum PlatformSyncError: LocalizedError {
 /// 4. Usage events, then one `app_syncs` row, which the dashboard shows as "last synced".
 @Observable
 final class PlatformSyncManager {
-    private static let autoSyncKey = "CalorieBuddy.autoPlatformSync"
     private static let batchSize = 500
     /// Ids per `in.(…)` filter, to keep request URLs short.
     private static let idsPerFilter = 100
@@ -57,11 +63,6 @@ final class PlatformSyncManager {
     private(set) var warnings: [String] = []
     private(set) var lastSummary: String?
 
-    /// Whether the app syncs by itself when it opens and when it goes to the background.
-    var autoSyncEnabled: Bool = UserDefaults.standard.object(forKey: PlatformSyncManager.autoSyncKey) as? Bool ?? true {
-        didSet { UserDefaults.standard.set(autoSyncEnabled, forKey: Self.autoSyncKey) }
-    }
-
     init(client: SupabaseClient = SupabaseClient()) {
         self.client = client
         lastSync = PlatformSyncState.load().lastSync
@@ -78,6 +79,12 @@ final class PlatformSyncManager {
         guard !isBusy else { return }
         isBusy = true
         defer { isBusy = false }
+        try await performSync(store: store, healthKit: healthKit, automatic: automatic,
+                              replacingServerBackup: replacingServerBackup)
+    }
+
+    private func performSync(store: DataStore, healthKit: HealthKitManager, automatic: Bool,
+                             replacingServerBackup: Bool) async throws {
         do {
             guard client.isSignedIn else { throw SupabaseError.notSignedIn }
             var state = PlatformSyncState.load()
@@ -85,21 +92,29 @@ final class PlatformSyncManager {
 
             let plans = try await syncNutritionPlans(store: store, state: &state, warnings: &newWarnings)
             state.save()
-            let documents = try await pushDocuments(store.databaseSnapshot(), state: &state,
+            // What was changed on the dashboard comes in first, so the push below doesn't undo it.
+            let pulled = try await pullDocuments(store: store, state: &state, warnings: &newWarnings)
+            state.save()
+            let database = store.databaseSnapshot()
+            let documents = try await pushDocuments(database, state: &state,
                                                     replacingServerBackup: replacingServerBackup)
             state.save()
+            let photos = try await pushPhotos(database, state: &state)
             let health = try await pushHealth(healthKit, state: &state)
             try await flushEvents()
 
             let summary = [
+                "\(pulled) alterações do dashboard",
                 "\(documents.entries) registos do diário", "\(documents.other) outros registos",
+                "\(photos.uploaded) fotos enviadas e \(photos.deleted) apagadas",
                 "\(health.samples) amostras e \(health.workouts) treinos da app Saúde",
                 "\(plans.pulled) planos recebidos", "\(plans.pushed) planos enviados"
             ]
             try await client.upsert("app_syncs", rows: [[
                 "id": UUID().uuidString,
                 "app_version": Self.appVersion,
-                "stats": ["entries": documents.entries, "documents": documents.other,
+                "stats": ["entries": documents.entries, "documents": documents.other, "documents_pulled": pulled,
+                          "photos_uploaded": photos.uploaded, "photos_deleted": photos.deleted,
                           "health_samples": health.samples, "workouts": health.workouts,
                           "plans_pulled": plans.pulled, "plans_pushed": plans.pushed]
             ]], onConflict: "id")
@@ -118,10 +133,11 @@ final class PlatformSyncManager {
         }
     }
 
-    /// Automatic sync — silently skipped when disabled, signed out, busy, or synced less than
+    /// Automatic sync — silently skipped when signed out, busy, or synced less than
     /// `minimumInterval` ago. Errors stay visible in the sync screen.
     func autoSyncIfEnabled(store: DataStore, healthKit: HealthKitManager, minimumInterval: TimeInterval = 0) async {
-        guard isAvailable, client.isSignedIn, autoSyncEnabled, !isBusy else { return }
+        // Always on while signed in: the dashboard depends on the platform having everything.
+        guard isAvailable, client.isSignedIn, !isBusy else { return }
         if let lastSync, Date().timeIntervalSince(lastSync) < minimumInterval { return }
         #if canImport(UIKit)
         // Ask iOS for a little extra time so the sync can finish after the app is backgrounded.
@@ -129,6 +145,128 @@ final class PlatformSyncManager {
         defer { UIApplication.shared.endBackgroundTask(taskID) }
         #endif
         try? await sync(store: store, healthKit: healthKit, automatic: true)
+    }
+
+    /// How long after the last local change the sync starts, so a burst of edits (a recipe logged
+    /// as several entries, a few foods added in a row) goes up together.
+    private static let localChangeDelay: Duration = .seconds(3)
+    /// Whether a sync for local changes is already waiting.
+    private var localSyncPending = false
+    private var lastLocalChange = ContinuousClock.now
+
+    /// After every change the user makes (`DataStore.localChangeCount`): products, intakes,
+    /// photos… reach the platform — and the dashboard — within seconds. If a sync is running it
+    /// may have missed the change, so this waits for it and syncs again; changes while waiting
+    /// share that one sync.
+    func syncAfterLocalChange(store: DataStore, healthKit: HealthKitManager) async {
+        lastLocalChange = .now
+        guard isAvailable, client.isSignedIn, !localSyncPending else { return }
+        localSyncPending = true
+        while isBusy || ContinuousClock.now - lastLocalChange < Self.localChangeDelay {
+            try? await Task.sleep(for: .seconds(1))
+        }
+        // Cleared before syncing: a change made during this sync asks for another one.
+        localSyncPending = false
+        await autoSyncIfEnabled(store: store, healthKit: healthKit)
+    }
+
+    // MARK: Session (sign in / sign out)
+
+    /// While signing in and downloading the account: the login screen stays up until it's done.
+    private(set) var isLoadingAccount = false
+
+    /// The login screen: signs in (athlete accounts only), then `completeSignIn`. On failure the
+    /// session is dropped again (nothing local is erased) and the error is thrown.
+    func signIn(email: String, password: String, store: DataStore, healthKit: HealthKitManager) async throws {
+        isLoadingAccount = true
+        defer { isLoadingAccount = false }
+        do {
+            try await client.signIn(email: email, password: password)
+            try await completeSignIn(store: store, healthKit: healthKit)
+        } catch {
+            await client.signOut()
+            throw error
+        }
+    }
+
+    /// After signing in on the login screen: brings this iPhone in line with the platform, which
+    /// always holds the data (the dashboard depends on it).
+    ///
+    /// - An install that already synced with this server (e.g. the session had expired) just syncs.
+    /// - Otherwise, when the platform has data: whatever this iPhone holds that never reached it is
+    ///   sent first without deleting anything there, then everything is downloaded (diary, catalog,
+    ///   recipes, supplements, plans, measurements, photos, settings) — replacing what's local.
+    /// - When the platform is empty, this iPhone's data becomes its first backup.
+    func completeSignIn(store: DataStore, healthKit: HealthKitManager) async throws {
+        guard !isBusy else { return }
+        isBusy = true
+        defer { isBusy = false }
+
+        if PlatformSyncState.load().documentHashes.isEmpty {
+            let remote = try await client.selectRows("app_documents", select: "collection,id",
+                                                     filters: ["deleted_at": "is.null"], order: "collection,id", limit: 1)
+            if !remote.isEmpty {
+                if store.hasUserData { try await mergeLocalIntoPlatform(store: store) }
+                try await performRestore(into: store)
+            }
+        }
+        try await performSync(store: store, healthKit: healthKit, automatic: false, replacingServerBackup: false)
+    }
+
+    /// Ends the session and erases this iPhone's data, so the next sign-in starts from the
+    /// platform. Syncs first so nothing is lost; if that fails, it throws and nothing is erased —
+    /// unless `discardingUnsynced` (the user chose to sign out anyway).
+    func signOutErasingData(store: DataStore, healthKit: HealthKitManager, discardingUnsynced: Bool) async throws {
+        guard !isBusy else { return }
+        isBusy = true
+        defer { isBusy = false }
+        if !discardingUnsynced, client.isSignedIn {
+            try await performSync(store: store, healthKit: healthKit, automatic: false, replacingServerBackup: false)
+        }
+        await client.signOut()
+        store.deleteEverything()
+        PlatformSyncState.erase()
+        lastSync = nil
+        lastSummary = nil
+        lastError = nil
+        warnings = []
+    }
+
+    /// Sends every local record to the platform without deleting anything there — for data that
+    /// was on this iPhone before it ever synced with this server (union: nothing is lost).
+    private func mergeLocalIntoPlatform(store: DataStore) async throws {
+        var state = PlatformSyncState.load()
+        var ignored: [String] = []
+        _ = try await syncNutritionPlans(store: store, state: &state, warnings: &ignored)
+        let database = store.databaseSnapshot()
+        // Settings stay as the platform has them (there is only one set).
+        for collection in AppCollection.all(of: database) where collection.name != AppCollection.settings {
+            switch collection.name {
+            case AppCollection.entries:
+                let foods = Dictionary(database.foodItems.map { ($0.id, $0) }) { first, _ in first }
+                let rows = collection.documents.compactMap { $0.value as? FoodEntry }.map { Self.foodEntryRow($0, foods: foods) }
+                for batch in rows.chunked(into: Self.batchSize) { try await client.upsert("food_entries", rows: batch, onConflict: "id") }
+            case AppCollection.foodItems:
+                let rows = collection.documents.compactMap { $0.value as? FoodItem }.map(Self.foodItemRow)
+                for batch in rows.chunked(into: Self.batchSize) { try await client.upsert("food_items", rows: batch, onConflict: "id") }
+            case AppCollection.progressPhotos:
+                let rows = collection.documents.compactMap { $0.value as? ProgressPhoto }.map(Self.progressPhotoRow)
+                for batch in rows.chunked(into: Self.batchSize) { try await client.upsert("progress_photos", rows: batch, onConflict: "id") }
+            case AppCollection.supplements:
+                let rows = collection.documents.compactMap { $0.value as? Supplement }.map { Self.supplementRow($0, in: database) }
+                for batch in rows.chunked(into: Self.batchSize) { try await client.upsert("supplements", rows: batch, onConflict: "id") }
+            default:
+                break
+            }
+            let documentRows: [[String: Any]] = try collection.documents.map { document in
+                ["collection": collection.name, "id": document.id, "data": try Self.jsonObject(document.value), "deleted_at": NSNull()]
+            }
+            for batch in documentRows.chunked(into: Self.batchSize) {
+                try await client.upsert("app_documents", rows: batch, onConflict: "collection,id")
+            }
+        }
+        _ = try await pushPhotos(database, state: &state)
+        state.save()
     }
 
     // MARK: Restore
@@ -139,6 +277,10 @@ final class PlatformSyncManager {
         guard !isBusy else { return }
         isBusy = true
         defer { isBusy = false }
+        try await performRestore(into: store)
+    }
+
+    private func performRestore(into store: DataStore) async throws {
         do {
             guard client.isSignedIn else { throw SupabaseError.notSignedIn }
             let rows = try await client.selectRows("app_documents", select: "collection,id,data",
@@ -146,10 +288,18 @@ final class PlatformSyncManager {
             guard !rows.isEmpty else { throw PlatformSyncError.noServerBackup }
             let plans = try await fetchRemotePlans().compactMap(\.plan)
 
+            // A record the app can't read is left out (and counted) rather than failing the whole
+            // restore — signing in depends on it.
+            var unreadable = 0
             func decode<T: Decodable>(_ collection: String, as type: T.Type) throws -> [T] {
-                try rows.filter { $0["collection"] as? String == collection }.map { row in
-                    let data = try JSONSerialization.data(withJSONObject: row["data"] ?? [:])
-                    return try SupabaseClient.jsonDecoder.decode(T.self, from: data)
+                rows.filter { $0["collection"] as? String == collection }.compactMap { row in
+                    do {
+                        let data = try JSONSerialization.data(withJSONObject: row["data"] ?? [:])
+                        return try SupabaseClient.jsonDecoder.decode(T.self, from: data)
+                    } catch {
+                        unreadable += 1
+                        return nil
+                    }
                 }
             }
             let database = AppDatabase(
@@ -167,12 +317,31 @@ final class PlatformSyncManager {
                 mealPlans: try decode(AppCollection.mealPlan, as: MealPlan.self),
                 nutritionPlans: plans,
                 bodyMeasurements: try decode(AppCollection.bodyMeasurements, as: BodyMeasurement.self),
-                progressPhotos: try decode(AppCollection.progressPhotos, as: ProgressPhoto.self)
+                progressPhotos: try decode(AppCollection.progressPhotos, as: ProgressPhoto.self),
+                foodCategories: try decode(AppCollection.foodCategories, as: FoodCategory.self)
             )
+
+            // The images, before switching databases, so the restored records show their photos
+            // right away. One that fails is retried by `pushPhotos` on the next syncs.
+            var downloaded = Set<String>()
+            var missing = 0
+            for (path, id) in Self.photoPaths(in: database) {
+                if PhotoStore.exists(id) { continue }
+                do {
+                    try PhotoStore.write(try await client.downloadObject(Self.photoBucket, path: path), id: id)
+                    downloaded.insert(path)
+                } catch {
+                    missing += 1
+                }
+            }
+            warnings = (missing > 0 ? ["\(missing) fotos não puderam ser descarregadas — a app volta a tentar em cada sincronização."] : [])
+                + (unreadable > 0 ? ["\(unreadable) registos da plataforma não puderam ser lidos e ficaram de fora."] : [])
+
             store.replaceDatabase(with: database)
 
             // What's local now is exactly what's on the platform.
             var state = PlatformSyncState.load()
+            state.uploadedPhotoPaths = Array(downloaded)
             state.documentHashes = [:]
             for collection in AppCollection.all(of: database) {
                 state.documentHashes[collection.name] = try Dictionary(
@@ -281,6 +450,116 @@ final class PlatformSyncManager {
          "fat_g": targets.fatG, "water_ml": targets.waterML]
     }
 
+    // MARK: App data (down): changes made on the dashboard
+
+    /// Takes in the `app_documents` the dashboard changed since the last pull. A record the app
+    /// also changed since the last sync keeps the app's version (the push then overwrites the
+    /// platform's); otherwise the platform's version — or its deletion — wins. Documents the app
+    /// can't read are skipped with a warning, never blocking the rest.
+    private func pullDocuments(store: DataStore, state: inout PlatformSyncState,
+                               warnings: inout [String]) async throws -> Int {
+        // First sync from this install: nothing has been synced yet to compare against (the push
+        // decides what to do with an existing backup).
+        guard !state.documentHashes.isEmpty else { return 0 }
+        var filters: [String: String] = [:]
+        if let since = state.documentsPulledUntil { filters["updated_at"] = "gt.\(since)" }
+        let rows = try await client.selectRows("app_documents", select: "collection,id,data,updated_at,deleted_at",
+                                               filters: filters, order: "updated_at")
+        guard !rows.isEmpty else { return 0 }
+
+        var database = store.databaseSnapshot()
+        var localHashes: [String: [String: String]] = [:]
+        for collection in AppCollection.all(of: database) {
+            localHashes[collection.name] = try Dictionary(
+                uniqueKeysWithValues: collection.documents.map { ($0.id, try Self.hash($0.value)) }
+            )
+        }
+
+        var applied = 0
+        var unreadable = 0
+        for row in rows {
+            if let updatedAt = row["updated_at"] as? String { state.documentsPulledUntil = updatedAt }
+            guard let collection = row["collection"] as? String, let id = row["id"] as? String else { continue }
+            let isDeleted = !(row["deleted_at"] is NSNull || row["deleted_at"] == nil)
+            let synced = state.documentHashes[collection]?[id]
+            let local = localHashes[collection]?[id]
+            do {
+                // The platform's version, as the app would hash it (nil = deleted there).
+                let incoming: Any? = isDeleted ? nil : row["data"]
+                let serverHash = try incoming.map { try Self.hash(ofDocument: $0, in: collection) }
+                // Nothing new (typically the app's own last push), or the app changed it too:
+                // the app wins.
+                guard serverHash != synced, local == synced else { continue }
+                // The record is gone everywhere already: nothing to apply.
+                if serverHash == nil && local == nil { continue }
+                try Self.apply(incoming, id: id, collection: collection, to: &database)
+                state.documentHashes[collection, default: [:]][id] = serverHash
+                applied += 1
+            } catch {
+                unreadable += 1
+            }
+        }
+        if applied > 0 { store.applyRemoteChanges(database) }
+        if unreadable > 0 {
+            warnings.append("\(unreadable) registos vindos do dashboard não puderam ser lidos e foram ignorados.")
+        }
+        return applied
+    }
+
+    /// The hash the app would give `data` (a document of `collection`) — decoded into the app's
+    /// model and re-encoded, so formatting differences don't count as changes.
+    private static func hash(ofDocument data: Any, in collection: String) throws -> String {
+        var scratch = AppDatabase(version: AppDatabase.currentVersion, exportedAt: .now, settings: .default,
+                                  entries: [], foodItems: [], recipes: [], stores: [], supplementCategories: [],
+                                  supplements: [], supplementLogs: [], stockLocations: [], mealPlans: [],
+                                  nutritionPlans: [], bodyMeasurements: [], progressPhotos: [])
+        let id = (data as? [String: Any])?["id"] as? String ?? "current"
+        try apply(data, id: id, collection: collection, to: &scratch)
+        guard let document = AppCollection.all(of: scratch).first(where: { $0.name == collection })?.documents.first else {
+            throw PlatformSyncError.unreadableDocument
+        }
+        return try hash(document.value)
+    }
+
+    /// Inserts/replaces (`data`) or removes (`nil`) one document of `collection` in `database`.
+    private static func apply(_ data: Any?, id: String, collection: String, to database: inout AppDatabase) throws {
+        func merge<T: Decodable & Identifiable>(_ items: inout [T], _ type: T.Type) throws where T.ID == UUID {
+            guard let uuid = UUID(uuidString: id) else { throw PlatformSyncError.unreadableDocument }
+            guard let data else {
+                items.removeAll { $0.id == uuid }
+                return
+            }
+            let value = try SupabaseClient.jsonDecoder.decode(T.self, from: JSONSerialization.data(withJSONObject: data))
+            guard value.id == uuid else { throw PlatformSyncError.unreadableDocument }
+            if let index = items.firstIndex(where: { $0.id == uuid }) {
+                items[index] = value
+            } else {
+                items.append(value)
+            }
+        }
+        switch collection {
+        case AppCollection.entries: try merge(&database.entries, FoodEntry.self)
+        case AppCollection.foodItems: try merge(&database.foodItems, FoodItem.self)
+        case AppCollection.foodCategories: try merge(&database.foodCategories, FoodCategory.self)
+        case AppCollection.recipes: try merge(&database.recipes, Recipe.self)
+        case AppCollection.stores: try merge(&database.stores, Store.self)
+        case AppCollection.supplementCategories: try merge(&database.supplementCategories, SupplementCategory.self)
+        case AppCollection.supplements: try merge(&database.supplements, Supplement.self)
+        case AppCollection.supplementLogs: try merge(&database.supplementLogs, SupplementLogEntry.self)
+        case AppCollection.stockLocations: try merge(&database.stockLocations, StockLocation.self)
+        case AppCollection.bodyMeasurements: try merge(&database.bodyMeasurements, BodyMeasurement.self)
+        case AppCollection.progressPhotos: try merge(&database.progressPhotos, ProgressPhoto.self)
+        case AppCollection.mealPlan: try merge(&database.mealPlans, MealPlan.self)
+        case AppCollection.settings:
+            // One document; it can't be deleted, only replaced.
+            guard let data else { return }
+            database.settings = try SupabaseClient.jsonDecoder.decode(UserSettings.self,
+                                                                    from: JSONSerialization.data(withJSONObject: data))
+        default:
+            throw PlatformSyncError.unreadableDocument
+        }
+    }
+
     // MARK: App data (up)
 
     private func pushDocuments(_ database: AppDatabase, state: inout PlatformSyncState,
@@ -298,6 +577,10 @@ final class PlatformSyncManager {
             }
         }
 
+        // When the typed rows gain columns (e.g. food_items.photo_path), every record is re-sent
+        // once — their contents didn't change, so the hashes alone would skip them.
+        let resendTypedRows = (state.typedRowsVersion ?? 0) < PlatformSyncState.currentTypedRowsVersion
+
         var counts = (entries: 0, other: 0)
         for collection in AppCollection.all(of: database) {
             let previous = state.documentHashes[collection.name] ?? [:]
@@ -309,21 +592,35 @@ final class PlatformSyncManager {
                 if previous[document.id] != hash { changed.append(document) }
             }
             let deleted = previous.keys.filter { current[$0] == nil }
+            let typed = resendTypedRows && collection.name != AppCollection.entries ? collection.documents : changed
 
             // Typed rows first, so the dashboard has them even if the backup part fails.
             switch collection.name {
             case AppCollection.entries:
-                let rows = changed.compactMap { $0.value as? FoodEntry }.map(Self.foodEntryRow)
+                let foods = Dictionary(database.foodItems.map { ($0.id, $0) }) { first, _ in first }
+                let rows = typed.compactMap { $0.value as? FoodEntry }.map { Self.foodEntryRow($0, foods: foods) }
                 for batch in rows.chunked(into: Self.batchSize) {
                     try await client.upsert("food_entries", rows: batch, onConflict: "id")
                 }
                 try await softDelete("food_entries", ids: deleted)
             case AppCollection.foodItems:
-                let rows = changed.compactMap { $0.value as? FoodItem }.map(Self.foodItemRow)
+                let rows = typed.compactMap { $0.value as? FoodItem }.map(Self.foodItemRow)
                 for batch in rows.chunked(into: Self.batchSize) {
                     try await client.upsert("food_items", rows: batch, onConflict: "id")
                 }
                 try await softDelete("food_items", ids: deleted)
+            case AppCollection.progressPhotos:
+                let rows = typed.compactMap { $0.value as? ProgressPhoto }.map(Self.progressPhotoRow)
+                for batch in rows.chunked(into: Self.batchSize) {
+                    try await client.upsert("progress_photos", rows: batch, onConflict: "id")
+                }
+                try await softDelete("progress_photos", ids: deleted)
+            case AppCollection.supplements:
+                let rows = typed.compactMap { $0.value as? Supplement }.map { Self.supplementRow($0, in: database) }
+                for batch in rows.chunked(into: Self.batchSize) {
+                    try await client.upsert("supplements", rows: batch, onConflict: "id")
+                }
+                try await softDelete("supplements", ids: deleted)
             default:
                 break
             }
@@ -348,6 +645,73 @@ final class PlatformSyncManager {
                 counts.other += changed.count + deleted.count
             }
         }
+        state.typedRowsVersion = PlatformSyncState.currentTypedRowsVersion
+        return counts
+    }
+
+    // MARK: Photos (up)
+
+    static let photoBucket = "athlete-photos"
+
+    /// Every photo the database points at, by its path in the bucket (`<kind>/<photo id>.jpg`).
+    /// The folder decides who may see it on the dashboard (see the `athlete_photos` migration).
+    private static func photoPaths(in database: AppDatabase) -> [String: UUID] {
+        var paths: [String: UUID] = [:]
+        func add(_ kind: String, _ ids: [UUID?]) {
+            for id in ids.compactMap({ $0 }) { paths[photoPath(kind, id)] = id }
+        }
+        add("food", database.foodItems.map(\.photoID))
+        add("recipe", database.recipes.map(\.photoID))
+        add("supplement", database.supplements.map(\.photoID))
+        add("progress", database.progressPhotos.map(\.photoID))
+        // Nutrition-label photos go in the same folder as their record's photo, so the dashboard
+        // shows them to exactly the same people.
+        add("food", database.foodItems.flatMap(\.labelPhotoIDs))
+        add("recipe", database.recipes.flatMap(\.labelPhotoIDs))
+        add("supplement", database.supplements.flatMap(\.labelPhotoIDs))
+        return paths
+    }
+
+    private static func photoPath(_ kind: String, _ id: UUID) -> String {
+        "\(kind)/\(id.uuidString).jpg"
+    }
+
+    /// Uploads the photos not sent yet, downloads the ones missing on this iPhone and deletes the
+    /// ones no record uses any more. A photo id never changes its image (a new photo gets a new
+    /// id), so "sent once" is enough.
+    private func pushPhotos(_ database: AppDatabase,
+                            state: inout PlatformSyncState) async throws -> (uploaded: Int, deleted: Int) {
+        let wanted = Self.photoPaths(in: database)
+        var sent = Set(state.uploadedPhotoPaths ?? [])
+        var counts = (uploaded: 0, deleted: 0)
+
+        for (path, id) in wanted.sorted(by: { $0.key < $1.key }) where !sent.contains(path) {
+            guard let data = PhotoStore.data(id) else {
+                // Not on this iPhone (e.g. its download failed at sign-in): fetch it if the platform
+                // has it, so a failed download is retried on every sync instead of staying missing.
+                if let remote = try? await client.downloadObject(Self.photoBucket, path: path),
+                   (try? PhotoStore.write(remote, id: id)) != nil {
+                    sent.insert(path)
+                    state.uploadedPhotoPaths = Array(sent)
+                    state.save()
+                }
+                continue
+            }
+            try await client.uploadObject(Self.photoBucket, path: path, data: data, contentType: "image/jpeg")
+            sent.insert(path)
+            counts.uploaded += 1
+            state.uploadedPhotoPaths = Array(sent)
+            state.save()
+        }
+
+        let stale = sent.subtracting(wanted.keys).sorted()
+        for batch in stale.chunked(into: Self.idsPerFilter) {
+            try await client.deleteObjects(Self.photoBucket, paths: batch)
+            sent.subtract(batch)
+            counts.deleted += batch.count
+            state.uploadedPhotoPaths = Array(sent)
+            state.save()
+        }
         return counts
     }
 
@@ -360,8 +724,19 @@ final class PlatformSyncManager {
 
     /// A diary entry as the dashboard's `food_entries` row. The app doesn't record quantities
     /// or fibre; missing macros are sent as 0.
-    private static func foodEntryRow(_ entry: FoodEntry) -> [String: Any] {
-        [
+    /// `foods`: the catalog, to point the row at the food it was logged from (food_item_id) with
+    /// the amount eaten in g / ml / units.
+    private static func foodEntryRow(_ entry: FoodEntry, foods: [UUID: FoodItem]) -> [String: Any] {
+        let food = entry.foodItemID.flatMap { foods[$0] }
+        let amount = food.flatMap { food in entry.quantity.map { $0 * food.baseDoseAmount } }
+        let amountUnit: String? = food.map { food in
+            switch food.unit.baseUnit {
+            case .milliliter: return "ml"
+            case .unit: return "unit"
+            default: return "g"
+            }
+        }
+        return [
             "id": entry.id.uuidString,
             "eaten_at": SupabaseClient.timestamp(entry.date),
             "meal": entry.mealType.rawValue,
@@ -370,6 +745,15 @@ final class PlatformSyncManager {
             "protein_g": clamp(entry.protein ?? 0, max: 9_999),
             "carbs_g": clamp(entry.carbs ?? 0, max: 9_999),
             "fat_g": clamp(entry.fat ?? 0, max: 9_999),
+            "fiber_g": clamp(entry.fiber ?? 0, max: 9_999),
+            // The rest of the label: null when it wasn't stated (not the same as 0).
+            "saturated_fat_g": entry.saturatedFat.map { clamp($0, max: 9_999) } ?? NSNull(),
+            "sugars_g": entry.sugars.map { clamp($0, max: 9_999) } ?? NSNull(),
+            "salt_g": entry.salt.map { clamp($0, max: 9_999) } ?? NSNull(),
+            "micronutrients": (entry.micronutrients ?? [:]).filter { $0.value.isFinite && $0.value >= 0 },
+            "food_item_id": food?.id.uuidString ?? NSNull(),
+            "quantity": amount.flatMap { $0 > 0 ? clamp($0, max: 999_999) : nil } ?? NSNull(),
+            "unit": amount.flatMap { $0 > 0 ? amountUnit : nil } ?? NSNull(),
             "barcode": entry.barcode ?? NSNull(),
             "group_id": entry.groupID?.uuidString ?? NSNull(),
             "group_name": entry.groupName ?? NSNull(),
@@ -396,6 +780,67 @@ final class PlatformSyncManager {
             "protein_g_per_100": clamp((item.protein ?? 0) * factor, max: 9_999),
             "carbs_g_per_100": clamp((item.carbs ?? 0) * factor, max: 9_999),
             "fat_g_per_100": clamp((item.fat ?? 0) * factor, max: 9_999),
+            "fiber_g_per_100": clamp((item.fiber ?? 0) * factor, max: 9_999),
+            "saturated_fat_g_per_100": item.saturatedFat.map { clamp($0 * factor, max: 9_999) } ?? NSNull(),
+            "sugars_g_per_100": item.sugars.map { clamp($0 * factor, max: 9_999) } ?? NSNull(),
+            "salt_g_per_100": item.salt.map { clamp($0 * factor, max: 9_999) } ?? NSNull(),
+            "micronutrients_per_100": item.micronutrients
+                .filter { $0.value.isFinite && $0.value >= 0 }
+                .mapValues { $0 * factor },
+            "photo_path": item.photoID.map { photoPath("food", $0) } ?? NSNull(),
+            "source": "ios_app",
+            "deleted_at": NSNull()
+        ]
+    }
+
+    /// A supplement as the dashboard's `supplements` row — what someone with the supplements
+    /// category sees: stock per location (by name) and in total, and what one dose holds.
+    private static func supplementRow(_ supplement: Supplement, in database: AppDatabase) -> [String: Any] {
+        let unit: String = switch supplement.unit.baseUnit {
+        case .milliliter: "ml"
+        case .unit: "unit"
+        default: "g"
+        }
+        let toBase = supplement.unit.baseMultiplier
+        let locationName = Dictionary(database.stockLocations.map { ($0.id, $0.name) }) { first, _ in first }
+        let stocks = supplement.stocks.map { stock -> [String: Any] in
+            ["location": locationName[stock.locationID] ?? "?", "remaining": max(stock.remaining * toBase, 0)]
+        }
+        let dose = supplement.nutrition(quantity: 1)
+        func grams(_ value: Double?) -> Any { value.map { clamp($0, max: 9_999) } ?? NSNull() }
+        return [
+            "id": supplement.id.uuidString,
+            "name": supplement.name,
+            "category": database.supplementCategories.first { $0.id == supplement.categoryID }?.name ?? NSNull(),
+            "unit": unit,
+            "package_size": clamp(supplement.totalSize * toBase, max: 99_999_999),
+            "dose_size": clamp(supplement.doseSize * toBase, max: 99_999_999),
+            "stocks": stocks,
+            "stock_total": clamp(supplement.totalRemaining * toBase, max: 99_999_999),
+            "low_stock_threshold": supplement.lowStockThreshold.map { clamp($0 * toBase, max: 99_999_999) } ?? NSNull(),
+            "kcal_per_dose": supplement.calories == nil ? NSNull() : clamp(dose.calories, max: 99_999) as Any,
+            "protein_g_per_dose": grams(dose.protein),
+            "carbs_g_per_dose": grams(dose.carbs),
+            "sugars_g_per_dose": grams(dose.sugars),
+            "fat_g_per_dose": grams(dose.fat),
+            "salt_g_per_dose": grams(dose.salt),
+            "micronutrients_per_dose": dose.micronutrients.stored.filter { $0.value.isFinite && $0.value >= 0 },
+            "photo_path": supplement.photoID.map { photoPath("supplement", $0) } ?? NSNull(),
+            "source": "ios_app",
+            "deleted_at": NSNull()
+        ]
+    }
+
+    /// A physical-progress photo as the dashboard's `progress_photos` row (the image itself goes to
+    /// Storage in `pushPhotos`).
+    private static func progressPhotoRow(_ photo: ProgressPhoto) -> [String: Any] {
+        let notes = photo.notes?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return [
+            "id": photo.id.uuidString,
+            "taken_on": dayString(photo.date),
+            "pose": photo.pose.rawValue,
+            "storage_path": photoPath("progress", photo.photoID),
+            "notes": notes.flatMap { $0.isEmpty ? nil : String($0.prefix(1000)) } ?? NSNull(),
             "source": "ios_app",
             "deleted_at": NSNull()
         ]
@@ -545,6 +990,7 @@ private struct RemotePlan: Decodable {
 private struct AppCollection {
     static let entries = "entries"
     static let foodItems = "foodItems"
+    static let foodCategories = "foodCategories"
     static let recipes = "recipes"
     static let stores = "stores"
     static let supplementCategories = "supplementCategories"
@@ -571,8 +1017,10 @@ private struct AppCollection {
 
     static func all(of database: AppDatabase) -> [AppCollection] {
         [
-            AppCollection(entries, database.entries),
+            // Foods before the diary: an entry's typed row points at its food's (food_item_id).
             AppCollection(foodItems, database.foodItems),
+            AppCollection(entries, database.entries),
+            AppCollection(foodCategories, database.foodCategories),
             AppCollection(recipes, database.recipes),
             AppCollection(stores, database.stores),
             AppCollection(supplementCategories, database.supplementCategories),
@@ -580,8 +1028,7 @@ private struct AppCollection {
             AppCollection(supplementLogs, database.supplementLogs),
             AppCollection(stockLocations, database.stockLocations),
             AppCollection(bodyMeasurements, database.bodyMeasurements),
-            // Only the metadata (date, pose, photo id): the images themselves aren't uploaded yet —
-            // see `.claude/notes/photos-api-dashboard.md` (Supabase Storage bucket).
+            // The metadata (date, pose, photo id); the images go to Storage in `pushPhotos`.
             AppCollection(progressPhotos, database.progressPhotos),
             // One document per plan, by id. (A single plan used to be stored under id "current";
             // the first sync after the update soft-deletes that one.)
@@ -597,6 +1044,21 @@ private struct PlatformSyncState: Codable {
     var planHashes: [String: String] = [:]
     var healthSyncedUntil: Date?
     var lastSync: Date?
+    /// `updated_at` of the newest `app_documents` row taken in (the platform's own timestamp text,
+    /// so no precision is lost). Optional like the fields below.
+    var documentsPulledUntil: String?
+    // Optional: state files written before these existed must still decode (a failed decode
+    // would look like a first sync).
+    /// Photo paths already in the bucket.
+    var uploadedPhotoPaths: [String]?
+    /// Version of the typed-row mapping last sent (see `currentTypedRowsVersion`).
+    var typedRowsVersion: Int?
+
+    /// Bump when `foodItemRow`/`foodEntryRow`/`progressPhotoRow` gain columns, to re-send every
+    /// record once. 1: food_items.photo_path and progress_photos. 2: the full nutrition label
+    /// (sugars, saturated fat, fibre, salt, micronutrients — migration nutrition_details).
+    /// 3: supplements (migration supplements_catalog) and food_entries.food_item_id/quantity.
+    static let currentTypedRowsVersion = 3
 
     /// One file per server: a Debug build (local Supabase) and a Release build (the VPS) on the
     /// same iPhone must not share what they think was already sent.
@@ -605,6 +1067,11 @@ private struct PlatformSyncState: Codable {
         let server = SupabaseConfig.current.map { "\($0.url.host() ?? "")\($0.url.port.map { ":\($0)" } ?? "")" } ?? "none"
         let suffix = SHA256.hash(data: Data(server.utf8)).prefix(4).map { String(format: "%02x", $0) }.joined()
         return support.appendingPathComponent("CalorieBuddy/platform_sync_state-\(suffix).json")
+    }
+
+    /// Forgets everything synced with this server (after signing out and erasing the data).
+    static func erase() {
+        try? FileManager.default.removeItem(at: url)
     }
 
     static func load() -> PlatformSyncState {

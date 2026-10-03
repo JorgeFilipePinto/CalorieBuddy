@@ -24,10 +24,18 @@ struct MyApp: App {
         WindowGroup {
             ZStack {
                 if entryPhase == .main {
-                    ContentView()
-                        .environment(store)
-                        .environment(healthKit)
-                        .environment(platformSync)
+                    Group {
+                        // With a platform configured, the app needs the athlete's session: the
+                        // data lives there (the dashboard depends on it) and comes down at sign-in.
+                        if platformSync.isAvailable && (!platformSync.client.isSignedIn || platformSync.isLoadingAccount) {
+                            LoginView()
+                        } else {
+                            ContentView()
+                        }
+                    }
+                    .environment(store)
+                    .environment(healthKit)
+                    .environment(platformSync)
                 }
 
                 switch entryPhase {
@@ -48,6 +56,9 @@ struct MyApp: App {
             // Matches the dashboard, which is always dark (`<html class="dark">` in
             // globals.css) with the same IRONMAN red as its primary colour (AccentColor).
             .preferredColorScheme(.dark)
+        }
+        .onChange(of: store.localChangeCount) {
+            Task { await platformSync.syncAfterLocalChange(store: store, healthKit: healthKit) }
         }
         .onChange(of: scenePhase) { _, phase in
             switch phase {

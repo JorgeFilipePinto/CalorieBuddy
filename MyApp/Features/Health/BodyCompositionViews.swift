@@ -66,8 +66,10 @@ extension DataStore {
 
 // MARK: - Sections shown in Saúde
 
-/// "Composição Corporal" or "Medidas Corporais", for the Saúde tab's list. Logging happens from
-/// the "Registo de Medidas" area at the top of the screen (`BodyMeasurementLogCard`).
+/// "Composição Corporal" or "Medidas Corporais", for the Saúde tab's list. Composition lists every
+/// metric; the tape measurements are one row (latest values as subtitle) that opens
+/// `BodyMeasurementsView`. Logging happens from the "Registo de Medidas" area
+/// (`BodyMeasurementLogCard`).
 struct BodyCompositionSections: View {
     enum Part { case composition, circumferences }
 
@@ -82,7 +84,7 @@ struct BodyCompositionSections: View {
             Section {
                 bmiRow
                 ForEach(BodyMetric.composition) { metric in
-                    metricRow(metric)
+                    BodyMetricRow(metric: metric)
                 }
             } header: {
                 Text("Composição Corporal")
@@ -91,15 +93,45 @@ struct BodyCompositionSections: View {
             }
         case .circumferences:
             Section {
-                ForEach(BodyMetric.circumferences) { metric in
-                    metricRow(metric)
+                NavigationLink {
+                    BodyMeasurementsView()
+                } label: {
+                    measurementsSummaryRow
                 }
-            } header: {
-                Text("Medidas Corporais")
             } footer: {
-                Text("A cintura é guardada na app Saúde; as outras medidas ficam na app. Toca numa medida para ver o histórico e como a medir.")
+                Text("Pescoço, peito, braço, cintura, anca, coxa e gémeo — toca para ver cada medida, o histórico e como medir.")
             }
         }
+    }
+
+    /// "Medidas Corporais" with the current value of each measurement as the subtitle.
+    private var measurementsSummaryRow: some View {
+        let latest = BodyMetric.circumferences.compactMap { metric in
+            store.readings(of: metric, healthKit: healthKit).first.map { (metric, $0) }
+        }
+        let lastDate = latest.map(\.1.date).max()
+        return HStack(spacing: 12) {
+            BodyMetricIcon(systemImage: "ruler", color: .blue)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Medidas Corporais")
+                if latest.isEmpty {
+                    Text("Ainda sem medidas registadas")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text(latest.map { "\($0.0.displayName) \($0.0.formatted($0.1.value))" }.joined(separator: " · "))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                    if let lastDate {
+                        Text("Última medição: \(lastDate.formatted(date: .abbreviated, time: .omitted))")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+            }
+        }
+        .padding(.vertical, 2)
     }
 
     // MARK: Rows
@@ -113,7 +145,7 @@ struct BodyCompositionSections: View {
         }()
         let bmi = fromHealth?.value ?? computed
         return HStack {
-            metricIcon("figure", color: .teal)
+            BodyMetricIcon(systemImage: "figure", color: .teal)
             VStack(alignment: .leading, spacing: 2) {
                 Text("IMC")
                 if let bmi {
@@ -133,13 +165,32 @@ struct BodyCompositionSections: View {
         }
     }
 
-    private func metricRow(_ metric: BodyMetric) -> some View {
+    /// WHO adult categories.
+    static func bmiCategory(_ bmi: Double) -> String {
+        switch bmi {
+        case ..<18.5: return "Baixo peso"
+        case ..<25: return "Peso normal"
+        case ..<30: return "Excesso de peso"
+        default: return "Obesidade"
+        }
+    }
+}
+
+/// One body metric: latest value, its date and source, and the change since the reading before.
+/// Opens the metric's history.
+struct BodyMetricRow: View {
+    @Environment(DataStore.self) private var store
+    @Environment(HealthKitManager.self) private var healthKit
+
+    let metric: BodyMetric
+
+    var body: some View {
         let readings = store.readings(of: metric, healthKit: healthKit)
-        return NavigationLink {
+        NavigationLink {
             BodyMetricHistoryView(metric: metric)
         } label: {
             HStack {
-                metricIcon(metric.symbolName, color: metric.color)
+                BodyMetricIcon(systemImage: metric.symbolName, color: metric.color)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(metric.displayName)
                     if let latest = readings.first {
@@ -164,22 +215,59 @@ struct BodyCompositionSections: View {
             }
         }
     }
+}
 
-    private func metricIcon(_ systemImage: String, color: Color) -> some View {
+/// The small coloured square icon of the body-metric rows.
+struct BodyMetricIcon: View {
+    let systemImage: String
+    let color: Color
+
+    var body: some View {
         Image(systemName: systemImage)
             .font(.system(size: 14, weight: .semibold))
             .foregroundStyle(.white)
             .frame(width: 28, height: 28)
             .background(color, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
     }
+}
 
-    /// WHO adult categories.
-    static func bmiCategory(_ bmi: Double) -> String {
-        switch bmi {
-        case ..<18.5: return "Baixo peso"
-        case ..<25: return "Peso normal"
-        case ..<30: return "Excesso de peso"
-        default: return "Obesidade"
+// MARK: - Medidas Corporais (own screen)
+
+/// Every tape measurement with its latest value, change and history — opened from the
+/// "Medidas Corporais" row in Saúde.
+struct BodyMeasurementsView: View {
+    @State private var showingLog = false
+
+    var body: some View {
+        List {
+            Section {
+                ForEach(BodyMetric.circumferences) { metric in
+                    BodyMetricRow(metric: metric)
+                }
+            } footer: {
+                Text("A cintura é guardada na app Saúde; as outras medidas ficam na app. Toca numa medida para ver o histórico e como a medir.")
+            }
+            Section {
+                NavigationLink {
+                    MeasurementGuideView()
+                } label: {
+                    Label("Como Medir", systemImage: "questionmark.circle")
+                }
+            }
+        }
+        .navigationTitle("Medidas Corporais")
+        .trackScreen("Medidas Corporais")
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    showingLog = true
+                } label: {
+                    Label("Registar Medidas", systemImage: "plus")
+                }
+            }
+        }
+        .sheet(isPresented: $showingLog) {
+            LogBodyMeasurementsView()
         }
     }
 }

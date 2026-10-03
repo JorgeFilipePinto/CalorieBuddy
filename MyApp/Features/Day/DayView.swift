@@ -32,6 +32,9 @@ struct DayView: View {
     @State private var jsonImportGroupName = ""
     @State private var jsonImportMealType: MealType = .lunch
     @State private var entryToEdit: FoodEntry?
+    /// A logged recipe whose amounts are being changed (tapping one of its entries).
+    @State private var recipeLogToEdit: FoodEntry?
+    @State private var showingDayNutrients = false
 
     private var dayEntries: [FoodEntry] {
         store.entries(on: date).sorted { $0.date < $1.date }
@@ -127,17 +130,50 @@ struct DayView: View {
                 .padding(.vertical, 4)
             }
 
+            let dayNutrition = store.fullNutrition(on: date)
+            if dayNutrition.hasDetails {
+                Section {
+                    Button {
+                        showingDayNutrients = true
+                    } label: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Mais Nutrientes")
+                                Text(nutrientPreview(dayNutrition))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                    .tint(.primary)
+                }
+            }
+
             ForEach(MealType.allCases) { meal in
                 let mealEntries = dayEntries.filter { $0.mealType == meal }
                 if !mealEntries.isEmpty {
                     Section {
                         ForEach(mealEntries) { entry in
                             Button {
-                                entryToEdit = entry
+                                if loggedRecipe(of: entry) != nil {
+                                    recipeLogToEdit = entry
+                                } else {
+                                    entryToEdit = entry
+                                }
                             } label: {
                                 entryRow(entry)
                             }
                             .buttonStyle(.plain)
+                            .swipeActions(edge: .leading) {
+                                if loggedRecipe(of: entry) != nil {
+                                    Button("Editar Alimento") { entryToEdit = entry }
+                                        .tint(.blue)
+                                }
+                            }
                         }
                         .onDelete { offsets in
                             for index in offsets {
@@ -255,6 +291,27 @@ struct DayView: View {
                 }
             }
         }
+        .sheet(isPresented: $showingDayNutrients) {
+            NavigationStack {
+                List {
+                    Section {
+                        NutritionFactsRows(amounts: store.fullNutrition(on: date))
+                    } footer: {
+                        Text("Soma dos registos e das tomas de suplementos do dia. A %VRN usa os valores de referência da UE para adultos.")
+                    }
+                }
+                .navigationTitle("Nutrientes do Dia")
+                #if os(iOS)
+                .navigationBarTitleDisplayMode(.inline)
+                #endif
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("OK") { showingDayNutrients = false }
+                    }
+                }
+            }
+            .presentationDetents([.medium, .large])
+        }
         .sheet(isPresented: $showingAddEntry) {
             AddEntryView(defaultDate: date)
         }
@@ -275,6 +332,20 @@ struct DayView: View {
         }
         .sheet(item: $entryToEdit) { entry in
             AddEntryView(entryToEdit: entry)
+        }
+        .sheet(item: $recipeLogToEdit) { entry in
+            if let recipe = loggedRecipe(of: entry), let groupID = entry.groupID {
+                NavigationStack {
+                    RecipeLogView(recipe: recipe, date: entry.date, mealType: entry.mealType, groupID: groupID) {
+                        recipeLogToEdit = nil
+                    }
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Cancelar") { recipeLogToEdit = nil }
+                        }
+                    }
+                }
+            }
         }
         .sheet(isPresented: $showingJSONImport) {
             JSONImportSheet(
@@ -540,16 +611,32 @@ struct DayView: View {
         let newEntries = payloads.map { entryPayload in
             FoodEntry(
                 name: entryPayload.name.trimmingCharacters(in: .whitespaces),
-                calories: entryPayload.calories,
-                protein: entryPayload.protein,
-                carbs: entryPayload.carbs,
-                fat: entryPayload.fat,
+                nutrition: entryPayload.nutrition,
                 mealType: jsonImportMealType,
                 date: date
             )
         }
         store.addImportedEntries(newEntries, groupName: jsonImportGroupName)
         AppAnalytics.log(.entryLogged(source: .aiImport, mealType: jsonImportMealType))
+    }
+
+    /// "Açúcares 17 g · Saturados 2 g · Sal 1 g · 4 outros nutrientes".
+    private func nutrientPreview(_ amounts: NutritionAmounts) -> String {
+        var parts: [String] = []
+        if let sugars = amounts.sugars { parts.append("Açúcares \(NutritionFactsRows.format(sugars)) g") }
+        if let saturated = amounts.saturatedFat { parts.append("Saturados \(NutritionFactsRows.format(saturated)) g") }
+        if let fiber = amounts.fiber { parts.append("Fibra \(NutritionFactsRows.format(fiber)) g") }
+        if let salt = amounts.salt { parts.append("Sal \(NutritionFactsRows.format(salt)) g") }
+        let micros = amounts.micronutrients.count
+        if micros > 0 { parts.append(micros == 1 ? "1 outro nutriente" : "\(micros) outros nutrientes") }
+        return parts.joined(separator: " · ")
+    }
+
+    /// The recipe `entry` was logged from, when it still exists (its group's amounts can be
+    /// changed again).
+    private func loggedRecipe(of entry: FoodEntry) -> Recipe? {
+        guard entry.groupID != nil, let recipeID = entry.recipeID else { return nil }
+        return store.recipe(withID: recipeID)
     }
 
     private func entryRow(_ entry: FoodEntry) -> some View {
