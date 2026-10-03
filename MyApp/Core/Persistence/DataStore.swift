@@ -87,11 +87,19 @@ final class DataStore {
         }
     }
 
+    /// Bumped on every change the user makes (adding a food, logging a dose, a new photo…), so the
+    /// app syncs right away and the platform — and the dashboard — never lag behind. Records that
+    /// came from elsewhere (the platform, a file, the backup) or a wipe don't count.
+    private(set) var localChangeCount = 0
+
     private static func photoIDs(in database: AppDatabase) -> Set<UUID> {
         Set(database.foodItems.compactMap(\.photoID)
             + database.recipes.compactMap(\.photoID)
             + database.supplements.compactMap(\.photoID)
-            + database.progressPhotos.map(\.photoID))
+            + database.progressPhotos.map(\.photoID)
+            + database.foodItems.flatMap(\.labelPhotoIDs)
+            + database.recipes.flatMap(\.labelPhotoIDs)
+            + database.supplements.flatMap(\.labelPhotoIDs))
     }
 
     /// Seeds one example recipe and its ingredients on the very first launch, as a guide for
@@ -330,6 +338,22 @@ final class DataStore {
         foodItems.first { $0.barcodes.contains(barcode) }
     }
 
+    func supplement(forBarcode barcode: String) -> Supplement? {
+        supplements.first { $0.barcodes.contains(barcode) }
+    }
+
+    /// Adds a scanned barcode to an existing supplement (e.g. the first time its package is
+    /// scanned), so the next scan finds it straight away. Returns the updated supplement.
+    @discardableResult
+    func addBarcode(_ barcode: String, toSupplement supplementID: UUID) -> Supplement? {
+        guard let index = supplements.firstIndex(where: { $0.id == supplementID }) else { return nil }
+        if !supplements[index].barcodes.contains(barcode) {
+            supplements[index].barcodes.append(barcode)
+            persistActive()
+        }
+        return supplements[index]
+    }
+
     func totalCalories(for recipe: Recipe) -> Int {
         recipe.items.reduce(0) { partial, item in
             guard let food = foodItems.first(where: { $0.id == item.foodItemID }) else { return partial }
@@ -354,6 +378,23 @@ final class DataStore {
             totals.protein += food.scaledProtein(quantity: item.quantity) ?? 0
             totals.carbs += food.scaledCarbs(quantity: item.quantity) ?? 0
             totals.fat += food.scaledFat(quantity: item.quantity) ?? 0
+        }
+    }
+
+    /// The whole nutrition label of a list of catalog foods and their quantities (a recipe).
+    func fullNutrition(of items: [RecipeItem]) -> NutritionAmounts {
+        items.reduce(.zero) { total, item in
+            guard let food = foodItems.first(where: { $0.id == item.foodItemID }) else { return total }
+            return total + food.nutrition(quantity: item.quantity)
+        }
+    }
+
+    /// Everything eaten on `date`: the diary entries plus the supplement intakes.
+    func fullNutrition(on date: Date) -> NutritionAmounts {
+        let eaten = entries(on: date).reduce(NutritionAmounts.zero) { $0 + $1.nutrition }
+        return supplementLogs(on: date).reduce(eaten) { total, log in
+            guard let supplement = supplement(withID: log.supplementID) else { return total }
+            return total + supplement.nutrition(quantity: log.quantity)
         }
     }
 
@@ -523,8 +564,15 @@ final class DataStore {
         persistActive()
     }
 
+    /// Removes an intake (e.g. logged by mistake) and gives its doses back to the stock they were
+    /// taken from, if that stock still exists.
     func deleteSupplementLog(_ log: SupplementLogEntry) {
         supplementLogs.removeAll { $0.id == log.id }
+        if let stockID = log.stockID,
+           let supplementIndex = supplements.firstIndex(where: { $0.id == log.supplementID }),
+           let stockIndex = supplements[supplementIndex].stocks.firstIndex(where: { $0.id == stockID }) {
+            supplements[supplementIndex].stocks[stockIndex].remaining += log.quantity * supplements[supplementIndex].doseSize
+        }
         persistActive()
     }
 
@@ -597,10 +645,7 @@ final class DataStore {
     func logFoodItem(_ item: FoodItem, quantity: Double, mealType: MealType, date: Date) {
         let entry = FoodEntry(
             name: item.name,
-            calories: item.scaledCalories(quantity: quantity),
-            protein: item.scaledProtein(quantity: quantity),
-            carbs: item.scaledCarbs(quantity: quantity),
-            fat: item.scaledFat(quantity: quantity),
+            nutrition: item.nutrition(quantity: quantity),
             mealType: mealType,
             date: date,
             barcode: item.barcodes.first
@@ -622,10 +667,7 @@ final class DataStore {
             guard let food = foodItems.first(where: { $0.id == recipeItem.foodItemID }) else { return nil }
             return FoodEntry(
                 name: food.name,
-                calories: food.scaledCalories(quantity: recipeItem.quantity),
-                protein: food.scaledProtein(quantity: recipeItem.quantity),
-                carbs: food.scaledCarbs(quantity: recipeItem.quantity),
-                fat: food.scaledFat(quantity: recipeItem.quantity),
+                nutrition: food.nutrition(quantity: recipeItem.quantity),
                 mealType: mealType,
                 date: date,
                 barcode: food.barcodes.first,
@@ -898,7 +940,7 @@ final class DataStore {
                 nutritionPlans.append(plan)
             }
         }
-        persistActive()
+        persistActive(countingChange: false)
     }
 
     // MARK: - Stores
@@ -974,7 +1016,10 @@ final class DataStore {
         )
     }
 
-    private func persistActive() {
+    /// `countingChange: false` for data that came from elsewhere (the platform, a file, the
+    /// backup) or a wipe: only the user's own edits should trigger a sync.
+    private func persistActive(countingChange: Bool = true) {
+        if countingChange { localChangeCount += 1 }
         guard let data = try? encoder.encode(currentDatabase()) else { return }
         try? data.write(to: activeURL, options: .atomic)
     }
@@ -1069,7 +1114,7 @@ final class DataStore {
         mealPlans = database.mealPlans
         bodyMeasurements = database.bodyMeasurements
         progressPhotos = database.progressPhotos
-        persistActive()
+        persistActive(countingChange: false)
     }
 
     // MARK: - Import (upload) / Restore
@@ -1112,7 +1157,7 @@ final class DataStore {
         nutritionPlans = database.nutritionPlans
         bodyMeasurements = database.bodyMeasurements
         progressPhotos = database.progressPhotos
-        persistActive()
+        persistActive(countingChange: false)
         refreshBackupTimestamp()
     }
 
@@ -1153,7 +1198,7 @@ final class DataStore {
         nutritionPlans = restoredDatabase.nutritionPlans
         bodyMeasurements = restoredDatabase.bodyMeasurements
         progressPhotos = restoredDatabase.progressPhotos
-        persistActive()
+        persistActive(countingChange: false)
         refreshBackupTimestamp()
     }
 
@@ -1186,7 +1231,7 @@ final class DataStore {
         try? fileManager.removeItem(at: backupURL)
         PhotoStore.deleteAll()
         backupTimestamp = nil
-        persistActive()
+        persistActive(countingChange: false)
     }
 }
 

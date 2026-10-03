@@ -32,6 +32,7 @@ struct DayView: View {
     @State private var jsonImportGroupName = ""
     @State private var jsonImportMealType: MealType = .lunch
     @State private var entryToEdit: FoodEntry?
+    @State private var showingDayNutrients = false
 
     private var dayEntries: [FoodEntry] {
         store.entries(on: date).sorted { $0.date < $1.date }
@@ -125,6 +126,29 @@ struct DayView: View {
                     }
                 }
                 .padding(.vertical, 4)
+            }
+
+            let dayNutrition = store.fullNutrition(on: date)
+            if dayNutrition.hasDetails {
+                Section {
+                    Button {
+                        showingDayNutrients = true
+                    } label: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Mais Nutrientes")
+                                Text(nutrientPreview(dayNutrition))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                    .tint(.primary)
+                }
             }
 
             ForEach(MealType.allCases) { meal in
@@ -254,6 +278,27 @@ struct DayView: View {
                     Image(systemName: "plus")
                 }
             }
+        }
+        .sheet(isPresented: $showingDayNutrients) {
+            NavigationStack {
+                List {
+                    Section {
+                        NutritionFactsRows(amounts: store.fullNutrition(on: date))
+                    } footer: {
+                        Text("Soma dos registos e das tomas de suplementos do dia. A %VRN usa os valores de referência da UE para adultos.")
+                    }
+                }
+                .navigationTitle("Nutrientes do Dia")
+                #if os(iOS)
+                .navigationBarTitleDisplayMode(.inline)
+                #endif
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("OK") { showingDayNutrients = false }
+                    }
+                }
+            }
+            .presentationDetents([.medium, .large])
         }
         .sheet(isPresented: $showingAddEntry) {
             AddEntryView(defaultDate: date)
@@ -540,16 +585,25 @@ struct DayView: View {
         let newEntries = payloads.map { entryPayload in
             FoodEntry(
                 name: entryPayload.name.trimmingCharacters(in: .whitespaces),
-                calories: entryPayload.calories,
-                protein: entryPayload.protein,
-                carbs: entryPayload.carbs,
-                fat: entryPayload.fat,
+                nutrition: entryPayload.nutrition,
                 mealType: jsonImportMealType,
                 date: date
             )
         }
         store.addImportedEntries(newEntries, groupName: jsonImportGroupName)
         AppAnalytics.log(.entryLogged(source: .aiImport, mealType: jsonImportMealType))
+    }
+
+    /// "Açúcares 17 g · Saturados 2 g · Sal 1 g · 4 vitaminas e minerais".
+    private func nutrientPreview(_ amounts: NutritionAmounts) -> String {
+        var parts: [String] = []
+        if let sugars = amounts.sugars { parts.append("Açúcares \(NutritionFactsRows.format(sugars)) g") }
+        if let saturated = amounts.saturatedFat { parts.append("Saturados \(NutritionFactsRows.format(saturated)) g") }
+        if let fiber = amounts.fiber { parts.append("Fibra \(NutritionFactsRows.format(fiber)) g") }
+        if let salt = amounts.salt { parts.append("Sal \(NutritionFactsRows.format(salt)) g") }
+        let micros = amounts.micronutrients.count
+        if micros > 0 { parts.append(micros == 1 ? "1 vitamina/mineral" : "\(micros) vitaminas e minerais") }
+        return parts.joined(separator: " · ")
     }
 
     private func entryRow(_ entry: FoodEntry) -> some View {

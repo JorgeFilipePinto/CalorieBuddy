@@ -141,8 +141,9 @@ struct SupplementsListView: View {
                 }
                 HStack(spacing: 4) {
                     Text("dose \(supplement.doseLabel)")
-                    if let calories = supplement.calories {
-                        Text("· \(calories) kcal")
+                    if supplement.calories != nil {
+                        // Per dose, whatever basis the label was entered with.
+                        Text("· \(supplement.scaledCalories(quantity: 1)) kcal")
                     }
                     if let doseCost = store.cost(for: supplement, quantity: 1) {
                         Text("· \(doseCost.formatted(.currency(code: currencyCode)))")
@@ -164,6 +165,11 @@ struct SupplementsListView: View {
                         }
                     }
                     .font(.caption2)
+                    if supplement.stocks.count > 1 {
+                        Text("Total: \(formatted(supplement.totalRemaining)) \(supplement.unit.shortLabel) · \(formatted(supplement.doses(in: supplement.totalRemaining))) doses")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
             Spacer()

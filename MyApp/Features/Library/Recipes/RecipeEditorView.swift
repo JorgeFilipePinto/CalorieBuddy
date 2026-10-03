@@ -8,6 +8,7 @@ struct RecipeEditorView: View {
 
     @State private var name = ""
     @State private var photoID: UUID?
+    @State private var labelPhotoIDs: [UUID] = []
     @State private var items: [RecipeItem] = []
     @State private var showingAddComponent = false
     @State private var showingJSONImport = false
@@ -44,6 +45,7 @@ struct RecipeEditorView: View {
                 Section("Foto") {
                     PhotoPickerField(photoID: $photoID)
                 }
+                NutritionLabelPhotosSection(photoIDs: $labelPhotoIDs)
                 #endif
 
                 Section("Receita") {
@@ -86,6 +88,16 @@ struct RecipeEditorView: View {
                         Text("Cria primeiro alimentos no catálogo.")
                     } else if !items.isEmpty {
                         Text("Total: \(totalCalories) kcal" + (totalCost > 0 ? " · \(totalCost.formatted(.currency(code: currencyCode)))" : ""))
+                    }
+                }
+
+                if !items.isEmpty {
+                    Section {
+                        NutritionFactsRows(amounts: store.fullNutrition(of: items))
+                    } header: {
+                        Text("Declaração Nutricional")
+                    } footer: {
+                        Text("A receita inteira, somada dos ingredientes. Os valores que um ingrediente não indica não entram no total.")
                     }
                 }
             }
@@ -135,6 +147,7 @@ struct RecipeEditorView: View {
         name = recipe.name
         items = recipe.items
         photoID = recipe.photoID
+        labelPhotoIDs = recipe.labelPhotoIDs
     }
 
     private func handleJSONImport(_ json: String) throws {
@@ -146,7 +159,7 @@ struct RecipeEditorView: View {
     }
 
     private func save() {
-        let recipe = Recipe(
+        var recipe = Recipe(
             id: recipeToEdit?.id ?? UUID(),
             name: name.trimmingCharacters(in: .whitespaces),
             items: items,
@@ -154,6 +167,7 @@ struct RecipeEditorView: View {
             createdAt: recipeToEdit?.createdAt ?? Date(),
             photoID: photoID
         )
+        recipe.labelPhotoIDs = labelPhotoIDs
         if recipeToEdit == nil {
             store.addRecipe(recipe)
         } else {

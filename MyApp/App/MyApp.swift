@@ -57,6 +57,9 @@ struct MyApp: App {
             // globals.css) with the same IRONMAN red as its primary colour (AccentColor).
             .preferredColorScheme(.dark)
         }
+        .onChange(of: store.localChangeCount) {
+            Task { await platformSync.syncAfterLocalChange(store: store, healthKit: healthKit) }
+        }
         .onChange(of: scenePhase) { _, phase in
             switch phase {
             case .background:

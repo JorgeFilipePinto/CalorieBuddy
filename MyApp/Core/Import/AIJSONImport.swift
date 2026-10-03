@@ -101,6 +101,10 @@ struct FoodImportPayload: Codable {
     var protein: Double?
     var carbs: Double?
     var fat: Double?
+    var saturatedFat: Double?
+    var sugars: Double?
+    var fiber: Double?
+    var salt: Double?
     var minerals: [NutrientImportPayload]?
     var vitamins: [NutrientImportPayload]?
 
@@ -109,7 +113,7 @@ struct FoodImportPayload: Codable {
 
     func makeFoodItem() -> FoodItem {
         let trimmedBrand = brand?.trimmingCharacters(in: .whitespaces)
-        return FoodItem(
+        var item = FoodItem(
             name: name.trimmingCharacters(in: .whitespaces),
             brand: (trimmedBrand?.isEmpty ?? true) ? nil : trimmedBrand,
             unit: resolvedUnit,
@@ -122,6 +126,16 @@ struct FoodImportPayload: Codable {
             minerals: (minerals ?? []).map { $0.makeNutrientValue() },
             vitamins: (vitamins ?? []).map { $0.makeNutrientValue() }
         )
+        item.saturatedFat = saturatedFat
+        item.sugars = sugars
+        item.fiber = fiber
+        item.salt = salt
+        // Names the fixed list knows (Vitamina C, Magnésio…) become `micronutrients`.
+        var micros: [String: Double] = [:]
+        item.minerals = FoodItem.adopt(item.minerals, into: &micros)
+        item.vitamins = FoodItem.adopt(item.vitamins, into: &micros)
+        item.micronutrients = micros
+        return item
     }
 }
 
@@ -137,6 +151,10 @@ extension FoodImportPayload {
         protein = try container.lenientDouble(forKey: .protein)
         carbs = try container.lenientDouble(forKey: .carbs)
         fat = try container.lenientDouble(forKey: .fat)
+        saturatedFat = try container.lenientDouble(forKey: .saturatedFat)
+        sugars = try container.lenientDouble(forKey: .sugars)
+        fiber = try container.lenientDouble(forKey: .fiber)
+        salt = try container.lenientDouble(forKey: .salt)
         minerals = try container.decodeIfPresent([NutrientImportPayload].self, forKey: .minerals)
         vitamins = try container.decodeIfPresent([NutrientImportPayload].self, forKey: .vitamins)
     }
@@ -169,6 +187,16 @@ struct DiaryEntryImportPayload: Codable {
     var protein: Double?
     var carbs: Double?
     var fat: Double?
+    var saturatedFat: Double?
+    var sugars: Double?
+    var fiber: Double?
+    var salt: Double?
+
+    /// What was eaten, for the diary entry.
+    var nutrition: NutritionAmounts {
+        NutritionAmounts(calories: Double(calories), protein: protein, carbs: carbs, sugars: sugars, fat: fat,
+                         saturatedFat: saturatedFat, fiber: fiber, salt: salt)
+    }
 }
 
 extension DiaryEntryImportPayload {
@@ -179,6 +207,10 @@ extension DiaryEntryImportPayload {
         protein = try container.lenientDouble(forKey: .protein)
         carbs = try container.lenientDouble(forKey: .carbs)
         fat = try container.lenientDouble(forKey: .fat)
+        saturatedFat = try container.lenientDouble(forKey: .saturatedFat)
+        sugars = try container.lenientDouble(forKey: .sugars)
+        fiber = try container.lenientDouble(forKey: .fiber)
+        salt = try container.lenientDouble(forKey: .salt)
     }
 }
 
@@ -195,6 +227,12 @@ struct SupplementImportPayload: Codable {
     var protein: Double?
     var carbs: Double?
     var fat: Double?
+    var saturatedFat: Double?
+    var sugars: Double?
+    var fiber: Double?
+    var salt: Double?
+    var minerals: [NutrientImportPayload]?
+    var vitamins: [NutrientImportPayload]?
 
     var resolvedUnit: MeasurementUnit { parseMeasurementUnit(unit) }
     /// One dose, falling back to the whole package (or 1) when the AI leaves it out.
@@ -202,7 +240,7 @@ struct SupplementImportPayload: Codable {
     var resolvedTotalSize: Double { totalSize.flatMap { $0 > 0 ? $0 : nil } ?? resolvedDoseSize }
 
     func makeSupplement(categoryID: UUID) -> Supplement {
-        Supplement(
+        var supplement = Supplement(
             name: name.trimmingCharacters(in: .whitespaces),
             categoryID: categoryID,
             unit: resolvedUnit,
@@ -213,6 +251,15 @@ struct SupplementImportPayload: Codable {
             carbs: carbs,
             fat: fat
         )
+        supplement.saturatedFat = saturatedFat
+        supplement.sugars = sugars
+        supplement.fiber = fiber
+        supplement.salt = salt
+        // Only what the fixed list knows: supplements have no free-text nutrients.
+        var micros: [String: Double] = [:]
+        _ = FoodItem.adopt(((minerals ?? []) + (vitamins ?? [])).map { $0.makeNutrientValue() }, into: &micros)
+        supplement.micronutrients = micros
+        return supplement
     }
 }
 
@@ -228,6 +275,12 @@ extension SupplementImportPayload {
         protein = try container.lenientDouble(forKey: .protein)
         carbs = try container.lenientDouble(forKey: .carbs)
         fat = try container.lenientDouble(forKey: .fat)
+        saturatedFat = try container.lenientDouble(forKey: .saturatedFat)
+        sugars = try container.lenientDouble(forKey: .sugars)
+        fiber = try container.lenientDouble(forKey: .fiber)
+        salt = try container.lenientDouble(forKey: .salt)
+        minerals = try container.decodeIfPresent([NutrientImportPayload].self, forKey: .minerals)
+        vitamins = try container.decodeIfPresent([NutrientImportPayload].self, forKey: .vitamins)
     }
 }
 
@@ -365,8 +418,9 @@ extension AIJSONImport {
         - doseSize: tamanho de uma dose habitual, na unidade indicada (ex.: 30 para 30 g de cereais, 1 para um ovo).
         - nutritionBasis: "per100" se os valores forem por 100 g/ml (como nos rótulos) ou "perDose" se forem por uma dose. Usa "perDose" quando unit for "unit".
         - calories: energia em kcal (número inteiro).
-        - protein, carbs, fat: proteína, hidratos de carbono e gordura, em gramas.
-        - minerals, vitamins (opcionais): listas de { name, amount, unit }, com unit "mg" ou "µg" (ex.: Sódio, Cálcio, Vitamina C).
+        - protein, carbs, fat: proteína, hidratos de carbono e lípidos, em gramas.
+        - saturatedFat, sugars, fiber, salt (opcionais): lípidos saturados, açúcares, fibra e sal, em gramas, como no rótulo.
+        - minerals, vitamins (opcionais): listas de { name, amount, unit }, com unit "mg" ou "µg" (ex.: Potássio, Magnésio, Vitamina C, Tiamina (B1), Cafeína).
         Se eu descrever vários alimentos, devolve um array com um objeto por alimento.
         """,
         template: """
@@ -380,6 +434,10 @@ extension AIJSONImport {
           "protein": <gramas>,
           "carbs": <gramas>,
           "fat": <gramas>,
+          "saturatedFat": <gramas>,
+          "sugars": <gramas>,
+          "fiber": <gramas>,
+          "salt": <gramas>,
           "minerals": [
             { "name": "<mineral>", "amount": <quantidade>, "unit": "<mg | µg>" }
           ],
@@ -430,7 +488,8 @@ extension AIJSONImport {
         Campos (um objeto por alimento ou prato, sempre num array):
         - name: nome do alimento ou prato, com a porção quando ajudar (ex.: "Arroz cozido (150 g)").
         - calories: energia da porção comida, em kcal (número inteiro).
-        - protein, carbs, fat (opcionais): proteína, hidratos de carbono e gordura da porção comida, em gramas.
+        - protein, carbs, fat (opcionais): proteína, hidratos de carbono e lípidos da porção comida, em gramas.
+        - saturatedFat, sugars, fiber, salt (opcionais): lípidos saturados, açúcares, fibra e sal da porção comida, em gramas.
         Os valores são os da porção que foi realmente comida, não por 100 g.
         """,
         template: """
@@ -440,7 +499,11 @@ extension AIJSONImport {
             "calories": <kcal da porção, inteiro>,
             "protein": <gramas>,
             "carbs": <gramas>,
-            "fat": <gramas>
+            "fat": <gramas>,
+            "saturatedFat": <gramas>,
+            "sugars": <gramas>,
+            "fiber": <gramas>,
+            "salt": <gramas>
           }
         ]
         """
@@ -463,7 +526,9 @@ extension AIJSONImport {
             - totalSize: quantidade total da embalagem, na unidade indicada (ex.: 900 para 900 g, 60 para 60 cápsulas).
             - doseSize: quantidade de uma dose, na unidade indicada (ex.: 30 para 30 g, 1 para um gel).
             - calories (opcional): energia de uma dose, em kcal (número inteiro).
-            - protein, carbs, fat (opcionais): proteína, hidratos de carbono e gordura de uma dose, em gramas.
+            - protein, carbs, fat (opcionais): proteína, hidratos de carbono e lípidos de uma dose, em gramas.
+            - saturatedFat, sugars, fiber, salt (opcionais): lípidos saturados, açúcares, fibra e sal de uma dose, em gramas.
+            - minerals, vitamins (opcionais): listas de { name, amount, unit } por dose, com unit "mg" ou "µg" (ex.: Potássio, Magnésio, Selénio, Vitamina C, Niacina (B3), Cafeína).
             Os valores nutricionais são por dose, não por 100 g. Se eu descrever vários suplementos, devolve um array com um objeto por suplemento.
             """,
             template: """
@@ -476,7 +541,17 @@ extension AIJSONImport {
               "calories": <kcal por dose, inteiro>,
               "protein": <gramas por dose>,
               "carbs": <gramas por dose>,
-              "fat": <gramas por dose>
+              "fat": <gramas por dose>,
+              "saturatedFat": <gramas por dose>,
+              "sugars": <gramas por dose>,
+              "fiber": <gramas por dose>,
+              "salt": <gramas por dose>,
+              "minerals": [
+                { "name": "<mineral>", "amount": <quantidade por dose>, "unit": "<mg | µg>" }
+              ],
+              "vitamins": [
+                { "name": "<vitamina>", "amount": <quantidade por dose>, "unit": "<mg | µg>" }
+              ]
             }
             """
         )

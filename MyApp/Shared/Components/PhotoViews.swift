@@ -125,6 +125,102 @@ struct PhotoPickerField: View {
     }
 }
 
+/// The photos of a nutrition label (front, back…): a row of thumbnails — tap one to see it full
+/// screen, long-press to remove it — plus camera / gallery buttons to add more (several at once
+/// from the gallery). Like `PhotoPickerField`, new photos are saved to `PhotoStore` straight away.
+struct NutritionLabelPhotosSection: View {
+    @Binding var photoIDs: [UUID]
+
+    @State private var items: [PhotosPickerItem] = []
+    @State private var showingCamera = false
+    @State private var shownPhoto: ShownPhoto?
+
+    private struct ShownPhoto: Identifiable {
+        let id: UUID
+        let image: UIImage
+    }
+
+    var body: some View {
+        Section {
+            if !photoIDs.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 10) {
+                        ForEach(photoIDs, id: \.self) { id in
+                            Button {
+                                if let image = PhotoStore.image(id) { shownPhoto = ShownPhoto(id: id, image: image) }
+                            } label: {
+                                PhotoThumbnail(photoID: id, size: 88, placeholder: "doc.text.image")
+                            }
+                            .buttonStyle(.plain)
+                            .contextMenu {
+                                Button("Remover Foto", systemImage: "trash", role: .destructive) {
+                                    photoIDs.removeAll { $0 == id }
+                                }
+                            }
+                            .accessibilityLabel("Foto da tabela nutricional")
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+
+            HStack(spacing: 12) {
+                if CameraPicker.isAvailable {
+                    Button {
+                        showingCamera = true
+                    } label: {
+                        Label("Fotografar", systemImage: "camera")
+                            .labelStyle(.titleAndIcon)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                }
+                PhotosPicker(selection: $items, maxSelectionCount: 6, matching: .images) {
+                    Label("Galeria", systemImage: "photo.on.rectangle")
+                        .labelStyle(.titleAndIcon)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+            }
+            // On this one row (always there), not on the Section: a Section hands its modifiers
+            // to every row, which would present twice and add the picked photos twice.
+            .onChange(of: items) {
+                guard !items.isEmpty else { return }
+                let picked = items
+                Task {
+                    for item in picked {
+                        if let data = try? await item.loadTransferable(type: Data.self),
+                           let image = UIImage(data: data),
+                           let id = PhotoStore.save(image) {
+                            photoIDs.append(id)
+                        }
+                    }
+                    items = []
+                }
+            }
+            .fullScreenCover(isPresented: $showingCamera) {
+                CameraPicker { image in
+                    if let id = PhotoStore.save(image) { photoIDs.append(id) }
+                }
+                .ignoresSafeArea()
+            }
+            .fullScreenCover(item: $shownPhoto) { photo in
+                PhotoFullScreenView(image: photo.image, caption: "Tabela Nutricional")
+            }
+        } header: {
+            Text("Tabela Nutricional")
+        } footer: {
+            Text(photoIDs.isEmpty
+                 ? "Fotografa o rótulo para teres sempre os valores à mão."
+                 : "Toca numa foto para a ver em grande; mantém o dedo para a remover.")
+        }
+    }
+}
+
 /// A photo on black, pinch-to-zoom, tap "OK" to close.
 struct PhotoFullScreenView: View {
     @Environment(\.dismiss) private var dismiss

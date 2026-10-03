@@ -147,6 +147,29 @@ final class PlatformSyncManager {
         try? await sync(store: store, healthKit: healthKit, automatic: true)
     }
 
+    /// How long after the last local change the sync starts, so a burst of edits (a recipe logged
+    /// as several entries, a few foods added in a row) goes up together.
+    private static let localChangeDelay: Duration = .seconds(3)
+    /// Whether a sync for local changes is already waiting.
+    private var localSyncPending = false
+    private var lastLocalChange = ContinuousClock.now
+
+    /// After every change the user makes (`DataStore.localChangeCount`): products, intakes,
+    /// photos… reach the platform — and the dashboard — within seconds. If a sync is running it
+    /// may have missed the change, so this waits for it and syncs again; changes while waiting
+    /// share that one sync.
+    func syncAfterLocalChange(store: DataStore, healthKit: HealthKitManager) async {
+        lastLocalChange = .now
+        guard isAvailable, client.isSignedIn, !localSyncPending else { return }
+        localSyncPending = true
+        while isBusy || ContinuousClock.now - lastLocalChange < Self.localChangeDelay {
+            try? await Task.sleep(for: .seconds(1))
+        }
+        // Cleared before syncing: a change made during this sync asks for another one.
+        localSyncPending = false
+        await autoSyncIfEnabled(store: store, healthKit: healthKit)
+    }
+
     // MARK: Session (sign in / sign out)
 
     /// While signing in and downloading the account: the login screen stays up until it's done.
@@ -630,6 +653,11 @@ final class PlatformSyncManager {
         add("recipe", database.recipes.map(\.photoID))
         add("supplement", database.supplements.map(\.photoID))
         add("progress", database.progressPhotos.map(\.photoID))
+        // Nutrition-label photos go in the same folder as their record's photo, so the dashboard
+        // shows them to exactly the same people.
+        add("food", database.foodItems.flatMap(\.labelPhotoIDs))
+        add("recipe", database.recipes.flatMap(\.labelPhotoIDs))
+        add("supplement", database.supplements.flatMap(\.labelPhotoIDs))
         return paths
     }
 
@@ -695,6 +723,12 @@ final class PlatformSyncManager {
             "protein_g": clamp(entry.protein ?? 0, max: 9_999),
             "carbs_g": clamp(entry.carbs ?? 0, max: 9_999),
             "fat_g": clamp(entry.fat ?? 0, max: 9_999),
+            "fiber_g": clamp(entry.fiber ?? 0, max: 9_999),
+            // The rest of the label: null when it wasn't stated (not the same as 0).
+            "saturated_fat_g": entry.saturatedFat.map { clamp($0, max: 9_999) } ?? NSNull(),
+            "sugars_g": entry.sugars.map { clamp($0, max: 9_999) } ?? NSNull(),
+            "salt_g": entry.salt.map { clamp($0, max: 9_999) } ?? NSNull(),
+            "micronutrients": (entry.micronutrients ?? [:]).filter { $0.value.isFinite && $0.value >= 0 },
             "barcode": entry.barcode ?? NSNull(),
             "group_id": entry.groupID?.uuidString ?? NSNull(),
             "group_name": entry.groupName ?? NSNull(),
@@ -721,6 +755,13 @@ final class PlatformSyncManager {
             "protein_g_per_100": clamp((item.protein ?? 0) * factor, max: 9_999),
             "carbs_g_per_100": clamp((item.carbs ?? 0) * factor, max: 9_999),
             "fat_g_per_100": clamp((item.fat ?? 0) * factor, max: 9_999),
+            "fiber_g_per_100": clamp((item.fiber ?? 0) * factor, max: 9_999),
+            "saturated_fat_g_per_100": item.saturatedFat.map { clamp($0 * factor, max: 9_999) } ?? NSNull(),
+            "sugars_g_per_100": item.sugars.map { clamp($0 * factor, max: 9_999) } ?? NSNull(),
+            "salt_g_per_100": item.salt.map { clamp($0 * factor, max: 9_999) } ?? NSNull(),
+            "micronutrients_per_100": item.micronutrients
+                .filter { $0.value.isFinite && $0.value >= 0 }
+                .mapValues { $0 * factor },
             "photo_path": item.photoID.map { photoPath("food", $0) } ?? NSNull(),
             "source": "ios_app",
             "deleted_at": NSNull()
@@ -949,9 +990,10 @@ private struct PlatformSyncState: Codable {
     /// Version of the typed-row mapping last sent (see `currentTypedRowsVersion`).
     var typedRowsVersion: Int?
 
-    /// Bump when `foodItemRow`/`progressPhotoRow` gain columns, to re-send every record once.
-    /// 1: food_items.photo_path and progress_photos.
-    static let currentTypedRowsVersion = 1
+    /// Bump when `foodItemRow`/`foodEntryRow`/`progressPhotoRow` gain columns, to re-send every
+    /// record once. 1: food_items.photo_path and progress_photos. 2: the full nutrition label
+    /// (sugars, saturated fat, fibre, salt, micronutrients — migration nutrition_details).
+    static let currentTypedRowsVersion = 2
 
     /// One file per server: a Debug build (local Supabase) and a Release build (the VPS) on the
     /// same iPhone must not share what they think was already sent.

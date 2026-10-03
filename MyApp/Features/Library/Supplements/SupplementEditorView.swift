@@ -16,6 +16,7 @@ struct SupplementEditorView: View {
 
     @State private var name = ""
     @State private var photoID: UUID?
+    @State private var labelPhotoIDs: [UUID] = []
     @State private var categoryID: UUID?
     @State private var showingCategoryPicker = false
 
@@ -29,9 +30,18 @@ struct SupplementEditorView: View {
     @State private var proteinText = ""
     @State private var carbsText = ""
     @State private var fatText = ""
+    @State private var saturatedFatText = ""
+    @State private var sugarsText = ""
+    @State private var fiberText = ""
+    @State private var saltText = ""
+    @State private var nutritionBasis: NutritionBasis = .perDose
+    @State private var micronutrients: [Micronutrient: Double] = [:]
 
     @State private var prices: [PriceEntry] = []
     @State private var showingAddPrice = false
+
+    @State private var barcodes: [String] = []
+    @State private var showingScanner = false
 
     @State private var stocks: [SupplementStock] = []
     @State private var lowStockThresholdText = ""
@@ -64,6 +74,35 @@ struct SupplementEditorView: View {
         }
     }
 
+    /// The label fields, edited together.
+    private var labelText: Binding<LabelNutritionText> {
+        Binding(
+            get: {
+                LabelNutritionText(calories: caloriesText, fat: fatText, saturatedFat: saturatedFatText, carbs: carbsText,
+                                   sugars: sugarsText, fiber: fiberText, protein: proteinText, salt: saltText)
+            },
+            set: { text in
+                caloriesText = text.calories
+                fatText = text.fat
+                saturatedFatText = text.saturatedFat
+                carbsText = text.carbs
+                sugarsText = text.sugars
+                fiberText = text.fiber
+                proteinText = text.protein
+                saltText = text.salt
+            }
+        )
+    }
+
+    /// "100 g" / "100 ml" — the reference amount of the "per 100" basis.
+    private var per100Label: String {
+        unit.baseUnit == .milliliter ? "100 ml" : "100 \(MeasurementUnit.gram.shortLabel)"
+    }
+
+    private var basisDescription: String {
+        nutritionBasis == .per100 ? "por \(per100Label)" : "por dose"
+    }
+
     private var isValid: Bool {
         !name.trimmingCharacters(in: .whitespaces).isEmpty
             && categoryID != nil
@@ -82,6 +121,7 @@ struct SupplementEditorView: View {
                 Section("Foto") {
                     PhotoPickerField(photoID: $photoID)
                 }
+                NutritionLabelPhotosSection(photoIDs: $labelPhotoIDs)
                 #endif
 
                 Section("Suplemento") {
@@ -152,15 +192,38 @@ struct SupplementEditorView: View {
                     }
                 }
 
-                Section("Macros por Dose (opcional)") {
-                    TextField("Calorias (kcal)", text: $caloriesText)
-                        .keyboardType(.numberPad)
-                    TextField("Proteína (g)", text: $proteinText)
-                        .keyboardType(.decimalPad)
-                    TextField("Hidratos de Carbono (g)", text: $carbsText)
-                        .keyboardType(.decimalPad)
-                    TextField("Gordura (g)", text: $fatText)
-                        .keyboardType(.decimalPad)
+                Section {
+                    if unit != .unit {
+                        Picker("Valores indicados", selection: $nutritionBasis) {
+                            Text("Por \(per100Label)").tag(NutritionBasis.per100)
+                            Text("Por dose").tag(NutritionBasis.perDose)
+                        }
+                        .pickerStyle(.segmented)
+                    }
+                    LabelNutritionFields(text: labelText)
+                } header: {
+                    Text("Declaração Nutricional (opcional)")
+                } footer: {
+                    Text("Copia uma das colunas do rótulo (\(basisDescription)). Conta para o dia sempre que registas uma toma.")
+                }
+
+                MicronutrientsSection(values: $micronutrients, basis: basisDescription)
+
+                Section {
+                    ForEach(barcodes, id: \.self) { code in
+                        Label(code, systemImage: "barcode")
+                    }
+                    .onDelete { offsets in barcodes.remove(atOffsets: offsets) }
+
+                    Button {
+                        showingScanner = true
+                    } label: {
+                        Label("Digitalizar Código de Barras", systemImage: "barcode.viewfinder")
+                    }
+                } header: {
+                    Text("Códigos de Barras")
+                } footer: {
+                    Text("Ao digitalizar este código no \"+\" de um dia, a app regista este suplemento.")
                 }
 
                 Section {
@@ -268,6 +331,13 @@ struct SupplementEditorView: View {
                     try handleJSONImport(json)
                 }
             }
+            .sheet(isPresented: $showingScanner) {
+                BarcodeScannerView { code in
+                    if !barcodes.contains(code) {
+                        barcodes.append(code)
+                    }
+                }
+            }
             .sheet(isPresented: $showingCategoryPicker) {
                 SupplementCategoryPickerView(selectedCategoryID: $categoryID)
             }
@@ -311,6 +381,7 @@ struct SupplementEditorView: View {
     private func populateIfEditing() {
         guard let supplement = supplementToEdit else { return }
         photoID = supplement.photoID
+        labelPhotoIDs = supplement.labelPhotoIDs
         name = supplement.name
         categoryID = supplement.categoryID
         unit = supplement.unit
@@ -322,8 +393,15 @@ struct SupplementEditorView: View {
         proteinText = supplement.protein.map { String($0) } ?? ""
         carbsText = supplement.carbs.map { String($0) } ?? ""
         fatText = supplement.fat.map { String($0) } ?? ""
+        saturatedFatText = LabelNutritionText.text(supplement.saturatedFat)
+        sugarsText = LabelNutritionText.text(supplement.sugars)
+        fiberText = LabelNutritionText.text(supplement.fiber)
+        saltText = LabelNutritionText.text(supplement.salt)
+        nutritionBasis = supplement.unit == .unit ? .perDose : supplement.nutritionBasis
+        micronutrients = supplement.micronutrients.typedMicronutrients
         prices = supplement.prices
         stocks = supplement.stocks
+        barcodes = supplement.barcodes
         lowStockThresholdText = supplement.lowStockThreshold.map(formatted) ?? ""
     }
 
@@ -343,6 +421,13 @@ struct SupplementEditorView: View {
         proteinText = first.protein.map { String($0) } ?? ""
         carbsText = first.carbs.map { String($0) } ?? ""
         fatText = first.fat.map { String($0) } ?? ""
+        let imported = first.makeSupplement(categoryID: UUID())
+        saturatedFatText = LabelNutritionText.text(imported.saturatedFat)
+        sugarsText = LabelNutritionText.text(imported.sugars)
+        fiberText = LabelNutritionText.text(imported.fiber)
+        saltText = LabelNutritionText.text(imported.salt)
+        nutritionBasis = .perDose
+        if !imported.micronutrients.isEmpty { micronutrients = imported.micronutrients.typedMicronutrients }
         for extra in payloads.dropFirst() {
             store.catalogSupplement(for: extra)
         }
@@ -350,24 +435,35 @@ struct SupplementEditorView: View {
 
     private func save() {
         guard let categoryID, let totalSize, let doseSize = computedDoseSize else { return }
-        let supplement = Supplement(
+        var supplement = Supplement(
             id: supplementToEdit?.id ?? UUID(),
             name: name.trimmingCharacters(in: .whitespaces),
             categoryID: categoryID,
             unit: unit,
             totalSize: totalSize,
             doseSize: doseSize,
-            calories: Int(caloriesText),
-            protein: Double(proteinText),
-            carbs: Double(carbsText),
-            fat: Double(fatText),
+            calories: LabelNutritionText.number(caloriesText).map { Int($0.rounded()) },
+            protein: LabelNutritionText.number(proteinText),
+            carbs: LabelNutritionText.number(carbsText),
+            fat: LabelNutritionText.number(fatText),
             prices: prices,
             stocks: stocks.filter { store.stockLocation(withID: $0.locationID) != nil },
             lowStockThreshold: Double(lowStockThresholdText.replacingOccurrences(of: ",", with: ".")),
             isFavorite: supplementToEdit?.isFavorite ?? false,
             createdAt: supplementToEdit?.createdAt ?? Date(),
-            photoID: photoID
+            photoID: photoID,
+            barcodes: barcodes
         )
+        supplement.labelPhotoIDs = labelPhotoIDs
+        supplement.nutritionBasis = unit == .unit ? .perDose : nutritionBasis
+        supplement.saturatedFat = LabelNutritionText.number(saturatedFatText)
+        supplement.sugars = LabelNutritionText.number(sugarsText)
+        supplement.fiber = LabelNutritionText.number(fiberText)
+        supplement.salt = LabelNutritionText.number(saltText)
+        // Keep keys this version doesn't know (written by a newer app or the dashboard).
+        var storedMicros = (supplementToEdit?.micronutrients ?? [:]).filter { Micronutrient(rawValue: $0.key) == nil }
+        storedMicros.merge(micronutrients.stored) { _, new in new }
+        supplement.micronutrients = storedMicros
         if supplementToEdit == nil {
             store.addSupplement(supplement)
         } else {
