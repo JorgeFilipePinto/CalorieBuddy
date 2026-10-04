@@ -875,17 +875,49 @@ final class DataStore {
         if let existing = existingCatalogFood(named: payload.name) {
             return existing
         }
-        let newItem = payload.makeFoodItem()
+        var newItem = payload.makeFoodItem()
+        newItem.categoryID = foodCategory(named: payload.category)?.id
+        if let barcode = payload.resolvedBarcode, foodItem(forBarcode: barcode) == nil {
+            newItem.barcodes = [barcode]
+        }
         addFoodItem(newItem)
         return newItem
     }
 
-    /// One ingredient of an AI-imported recipe, backed by `catalogFood(for:)`. The AI counts the
-    /// quantity in doses of *its* `doseSize`; when an existing catalog food with a different dose
-    /// is reused (e.g. 1.5 × 100 g of rice vs. the catalog's 150 g dose), the quantity is
-    /// converted so the amount stays the same — whenever both share a base unit (g, ml or units).
+    /// The food category called `name` (ignoring case and accents), if there is one.
+    func foodCategory(named name: String?) -> FoodCategory? {
+        guard let name, !name.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+        let wanted = SearchMatch.normalized(name).trimmingCharacters(in: .whitespaces)
+        return foodCategories.first { SearchMatch.normalized($0.name).trimmingCharacters(in: .whitespaces) == wanted }
+    }
+
+    /// The ingredients of an AI-imported recipe (`recipeItem(for:)` each); an ingredient the AI
+    /// listed twice becomes one, with the amounts added up.
+    func recipeItems(for payloads: [RecipeItemImportPayload]) -> [RecipeItem] {
+        var merged: [RecipeItem] = []
+        for item in payloads.map(recipeItem(for:)) {
+            if let index = merged.firstIndex(where: { $0.foodItemID == item.foodItemID }) {
+                merged[index].quantity += item.quantity
+            } else {
+                merged.append(item)
+            }
+        }
+        return merged
+    }
+
+    /// One ingredient of an AI-imported recipe, backed by `catalogFood(for:)`. The AI gives the
+    /// amount for one portion in g / ml / units (`amount`; older answers: doses of *its*
+    /// `doseSize`). It's stored in doses of the catalog food actually used — converted when an
+    /// existing food with a different dose is reused (e.g. 150 g of rice vs. a 100 g dose), as long
+    /// as both share a base unit (g, ml or units).
     func recipeItem(for payload: RecipeItemImportPayload) -> RecipeItem {
-        let quantity = payload.quantity ?? 1
+        let importedDose = payload.food.makeFoodItem().baseDoseAmount
+        let quantity: Double
+        if let amount = payload.amount, amount > 0, importedDose > 0 {
+            quantity = amount / importedDose
+        } else {
+            quantity = payload.quantity ?? 1
+        }
         guard let existing = existingCatalogFood(named: payload.food.name) else {
             return RecipeItem(foodItemID: catalogFood(for: payload.food).id, quantity: quantity)
         }
@@ -894,7 +926,8 @@ final class DataStore {
             return RecipeItem(foodItemID: existing.id, quantity: quantity)
         }
         let converted = quantity * imported.baseDoseAmount / existing.baseDoseAmount
-        return RecipeItem(foodItemID: existing.id, quantity: (converted * 100).rounded() / 100)
+        // Enough decimals that adding up two lines of the same food keeps the grams exact.
+        return RecipeItem(foodItemID: existing.id, quantity: (converted * 10_000).rounded() / 10_000)
     }
 
     private func existingCatalogFood(named name: String) -> FoodItem? {

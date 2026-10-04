@@ -235,7 +235,7 @@ struct FoodItemEditorView: View {
             .sheet(isPresented: $showingJSONImport) {
                 JSONImportSheet(
                     title: "Importar Alimento",
-                    prompt: AIJSONImport.foodPrompt,
+                    prompt: AIJSONImport.foodPrompt(categories: store.foodCategories.map(\.name)),
                     instructions: "Útil quando não há rótulo à mão. Se a resposta tiver vários alimentos, o primeiro preenche este formulário e os restantes são adicionados diretamente ao catálogo."
                 ) { json in
                     try handleJSONImport(json)
@@ -309,6 +309,8 @@ struct FoodItemEditorView: View {
         if !imported.micronutrients.isEmpty { micronutrients = imported.micronutrients.typedMicronutrients }
         if !imported.minerals.isEmpty { minerals = imported.minerals }
         if !imported.vitamins.isEmpty { vitamins = imported.vitamins }
+        if let category = store.foodCategory(named: payload.category) { categoryID = category.id }
+        if let barcode = payload.resolvedBarcode, !barcodes.contains(barcode) { barcodes.append(barcode) }
     }
 
     private func formatted(_ value: Double) -> String {

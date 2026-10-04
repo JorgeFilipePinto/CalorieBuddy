@@ -574,8 +574,15 @@ struct DayView: View {
             }
             Spacer()
             if let supplement, supplement.calories != nil {
-                Text("\(supplement.scaledCalories(quantity: log.quantity)) kcal")
-                    .foregroundStyle(.secondary)
+                let nutrition = supplement.nutrition(quantity: log.quantity)
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text("\(supplement.scaledCalories(quantity: log.quantity)) kcal")
+                        .foregroundStyle(.secondary)
+                    Text(macroSummary(protein: nutrition.protein, carbs: nutrition.carbs, fat: nutrition.fat))
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .monospacedDigit()
+                }
             }
         }
     }
@@ -645,6 +652,9 @@ struct DayView: View {
                 Text(entry.name)
                 HStack(spacing: 4) {
                     Text(entry.date.formatted(date: .omitted, time: .shortened))
+                    if let amount = amountEaten(entry) {
+                        Text("· \(amount)")
+                    }
                     if let groupName = entry.groupName {
                         Text("· \(groupName)")
                     }
@@ -656,9 +666,28 @@ struct DayView: View {
                 .foregroundStyle(.secondary)
             }
             Spacer()
-            Text("\(entry.calories) kcal")
-                .foregroundStyle(.secondary)
+            VStack(alignment: .trailing, spacing: 2) {
+                Text("\(entry.calories) kcal")
+                    .foregroundStyle(.secondary)
+                Text(macroSummary(protein: entry.protein, carbs: entry.carbs, fat: entry.fat))
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .monospacedDigit()
+            }
         }
+    }
+
+    /// "P 28 · HC 0 · G 3" — the brief summary under a row's calories ("—" for what isn't stated).
+    private func macroSummary(protein: Double?, carbs: Double?, fat: Double?) -> String {
+        let part = { (label: String, value: Double?) in "\(label) \(value.map(MacroFormat.grams) ?? "—")" }
+        return [part("P", protein), part("HC", carbs), part("G", fat)].joined(separator: " · ")
+    }
+
+    /// "125 g", "2 unidades" — how much was eaten, when the entry is linked to its catalog food.
+    private func amountEaten(_ entry: FoodEntry) -> String? {
+        guard let quantity = entry.quantity, let id = entry.foodItemID,
+              let food = store.foodItems.first(where: { $0.id == id }) else { return nil }
+        return RecipeIngredientEditorView.amountLabel(food: food, quantity: quantity)
     }
 }
 

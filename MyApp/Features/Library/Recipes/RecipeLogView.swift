@@ -78,14 +78,6 @@ struct RecipeLogView: View {
                 Text("Começa nas quantidades da receita. Deixa a 0 o que não usaste. Os valores de cada ingrediente vêm sempre do alimento: se o alterares, este registo acompanha.")
             }
 
-            if !included.isEmpty {
-                Section {
-                    NutritionFactsRows(amounts: store.fullNutrition(of: included))
-                } header: {
-                    Text("Total · \(store.amountSummary(of: included))")
-                }
-            }
-
             Section("Registo") {
                 Picker("Refeição", selection: $mealType) {
                     ForEach(MealType.allCases) { meal in
@@ -93,6 +85,14 @@ struct RecipeLogView: View {
                     }
                 }
                 DatePicker("Data", selection: $logDate)
+            }
+
+            if !included.isEmpty {
+                Section {
+                    NutritionFactsRows(amounts: store.fullNutrition(of: included))
+                } header: {
+                    Text("Total · \(store.amountSummary(of: included))")
+                }
             }
         }
         .navigationTitle(recipe.name)

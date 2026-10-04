@@ -161,14 +161,6 @@ struct FoodAmountsView: View {
                 Text("Começa numa dose de cada. Desliza para tirar um alimento.")
             }
 
-            if !items.isEmpty {
-                Section {
-                    NutritionFactsRows(amounts: store.fullNutrition(of: items))
-                } header: {
-                    Text("Total · \(store.amountSummary(of: items))")
-                }
-            }
-
             if initialMeal != nil {
                 Section("Registo") {
                     Picker("Refeição", selection: $mealType) {
@@ -177,6 +169,14 @@ struct FoodAmountsView: View {
                         }
                     }
                     DatePicker("Data", selection: $logDate)
+                }
+            }
+
+            if !items.isEmpty {
+                Section {
+                    NutritionFactsRows(amounts: store.fullNutrition(of: items))
+                } header: {
+                    Text("Total · \(store.amountSummary(of: items))")
                 }
             }
         }

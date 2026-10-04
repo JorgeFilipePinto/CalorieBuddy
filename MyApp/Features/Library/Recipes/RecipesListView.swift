@@ -149,7 +149,7 @@ struct RecipesListView: View {
         .sheet(isPresented: $showingJSONImport) {
             JSONImportSheet(
                 title: "Importar Receita",
-                prompt: AIJSONImport.recipePrompt,
+                prompt: AIJSONImport.recipePrompt(categories: store.foodCategories.map(\.name)),
                 instructions: "Útil quando não sabes ao detalhe o valor nutricional de cada ingrediente. Os ingredientes novos são adicionados ao catálogo; um com o mesmo nome de um alimento já existente é reutilizado.",
                 additionalFields: {
                     Section {
@@ -178,7 +178,7 @@ struct RecipesListView: View {
         let name = typedName.isEmpty ? (payload.name ?? "").trimmingCharacters(in: .whitespaces) : typedName
         guard !name.isEmpty else { throw AIImportError.missingRecipeName }
 
-        store.addRecipe(Recipe(name: name, items: payload.items.map(store.recipeItem(for:))))
+        store.addRecipe(Recipe(name: name, items: store.recipeItems(for: payload.items)))
     }
 
     private func row(for recipe: Recipe) -> some View {

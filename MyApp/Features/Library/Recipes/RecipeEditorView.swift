@@ -145,7 +145,7 @@ struct RecipeEditorView: View {
             .sheet(isPresented: $showingJSONImport) {
                 JSONImportSheet(
                     title: "Importar Receita",
-                    prompt: AIJSONImport.recipePrompt,
+                    prompt: AIJSONImport.recipePrompt(categories: store.foodCategories.map(\.name)),
                     instructions: "Útil quando não sabes ao detalhe o valor nutricional de cada ingrediente. Um ingrediente com o mesmo nome de um alimento já existente no catálogo é reutilizado em vez de criado outra vez."
                 ) { json in
                     try handleJSONImport(json)
@@ -167,7 +167,14 @@ struct RecipeEditorView: View {
         if name.trimmingCharacters(in: .whitespaces).isEmpty, let payloadName = payload.name {
             name = payloadName.trimmingCharacters(in: .whitespaces)
         }
-        items.append(contentsOf: payload.items.map(store.recipeItem(for:)))
+        // A food already in the recipe gets the imported amount added instead of a second line.
+        for item in store.recipeItems(for: payload.items) {
+            if let index = items.firstIndex(where: { $0.foodItemID == item.foodItemID }) {
+                items[index].quantity += item.quantity
+            } else {
+                items.append(item)
+            }
+        }
     }
 
     private func save() {

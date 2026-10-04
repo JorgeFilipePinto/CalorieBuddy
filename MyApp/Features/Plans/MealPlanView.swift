@@ -596,7 +596,7 @@ struct MealPlanOptionRow: View {
 }
 
 enum MacroFormat {
-    static func grams(_ value: Double) -> String {
+    nonisolated static func grams(_ value: Double) -> String {
         value.formatted(.number.precision(.fractionLength(0)))
     }
 

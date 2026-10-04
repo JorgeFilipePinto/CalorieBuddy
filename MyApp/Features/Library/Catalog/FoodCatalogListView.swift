@@ -180,7 +180,7 @@ struct FoodCatalogListView: View {
         .sheet(isPresented: $showingJSONImport) {
             JSONImportSheet(
                 title: "Importar Alimentos",
-                prompt: AIJSONImport.foodPrompt,
+                prompt: AIJSONImport.foodPrompt(categories: store.foodCategories.map(\.name)),
                 instructions: "Útil quando não há rótulo à mão. Todos os alimentos da resposta são adicionados ao catálogo; um alimento com o mesmo nome de um já existente é mantido como está."
             ) { json in
                 let payloads = try AIJSONImport.decodeFoodItems(from: json)
