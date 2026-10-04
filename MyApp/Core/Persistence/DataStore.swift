@@ -73,6 +73,37 @@ final class DataStore {
         seedExampleDataIfNeeded()
         removeOrphanPhotos()
         linkDiaryEntriesToFoodsIfNeeded()
+        if moveMealPlansToMealStages() { persistActive() }
+    }
+
+    /// Meal plans written when the diary only had four meals filed mid-morning, evening and
+    /// training meals under `.snack`; by their name they move to the stage that now exists
+    /// ("Meio da Manhã" → mid-morning, "Noite"/"Ceia" → supper, "Pré-/Pós-treino"). Idempotent;
+    /// returns whether anything changed (the caller persists).
+    @discardableResult
+    private func moveMealPlansToMealStages() -> Bool {
+        var changed = false
+        for planIndex in mealPlans.indices {
+            for mealIndex in mealPlans[planIndex].meals.indices where mealPlans[planIndex].meals[mealIndex].mealType == .snack {
+                let name = SearchMatch.normalized(mealPlans[planIndex].meals[mealIndex].name)
+                let stage: MealType? = if name.contains("meio da manha") || name.contains("manha") {
+                    .morningSnack
+                } else if name.contains("noite") || name.contains("ceia") {
+                    .supper
+                } else if name.contains("pre-treino") || name.contains("pre treino") {
+                    .preWorkout
+                } else if name.contains("pos-treino") || name.contains("pos treino") {
+                    .postWorkout
+                } else {
+                    nil
+                }
+                if let stage {
+                    mealPlans[planIndex].meals[mealIndex].mealType = stage
+                    changed = true
+                }
+            }
+        }
+        return changed
     }
 
     /// Entries logged before they recorded their food: once, link each one to the catalog food of
@@ -735,11 +766,11 @@ final class DataStore {
         entries.filter { $0.groupID == groupID }.sorted { $0.date < $1.date }
     }
 
-    /// Logs a recipe group again with new amounts (or meal), in place: same group, day and time;
-    /// an entry whose food is still there keeps its id. An ingredient at 0 is removed.
-    func relogRecipe(_ recipe: Recipe, group groupID: UUID, items: [RecipeItem], mealType: MealType) {
+    /// Logs a recipe group again with new amounts, meal or time, in place (same group); an entry
+    /// whose food is still there keeps its id. An ingredient at 0 is removed.
+    func relogRecipe(_ recipe: Recipe, group groupID: UUID, items: [RecipeItem], mealType: MealType, date: Date) {
         let old = entries(inGroup: groupID)
-        guard let date = old.first?.date else { return }
+        guard !old.isEmpty else { return }
         var replaced = linkedEntries(for: items.filter { $0.quantity > 0 }, groupID: groupID, groupName: recipe.name,
                                      mealType: mealType, date: date, recipeID: recipe.id)
         for index in replaced.indices {
@@ -1303,6 +1334,7 @@ final class DataStore {
         bodyMeasurements = database.bodyMeasurements
         progressPhotos = database.progressPhotos
         linkUnlinkedDiaryEntries()
+        moveMealPlansToMealStages()
         persistActive(countingChange: false)
         refreshBackupTimestamp()
     }

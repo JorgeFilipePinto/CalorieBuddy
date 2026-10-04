@@ -21,14 +21,19 @@ struct RecipeLogView: View {
     /// The amount typed for each line (by line id), in the food's own unit.
     @State private var amounts: [UUID: String] = [:]
     @State private var mealType: MealType
+    /// When it was eaten — like a single food's entry, the time can be changed.
+    @State private var logDate: Date
     @State private var didLoad = false
 
+    /// `date` is the day to log on (for today, the current time is used instead of midnight), or —
+    /// when editing — the time it was logged at.
     init(recipe: Recipe, date: Date, mealType: MealType, groupID: UUID? = nil, onDone: @escaping () -> Void) {
         self.recipe = recipe
         self.date = date
         self.groupID = groupID
         self.onDone = onDone
         _mealType = State(initialValue: mealType)
+        _logDate = State(initialValue: groupID == nil && Calendar.current.isDateInToday(date) ? .now : date)
     }
 
     /// The lines with the typed amounts, in doses (unreadable or empty = 0, left out).
@@ -81,12 +86,13 @@ struct RecipeLogView: View {
                 }
             }
 
-            Section("Refeição") {
+            Section("Registo") {
                 Picker("Refeição", selection: $mealType) {
                     ForEach(MealType.allCases) { meal in
                         Label(meal.displayName, systemImage: meal.symbolName).tag(meal)
                     }
                 }
+                DatePicker("Data", selection: $logDate)
             }
         }
         .navigationTitle(recipe.name)
@@ -167,9 +173,9 @@ struct RecipeLogView: View {
 
     private func save() {
         if let groupID {
-            store.relogRecipe(recipe, group: groupID, items: chosen, mealType: mealType)
+            store.relogRecipe(recipe, group: groupID, items: chosen, mealType: mealType, date: logDate)
         } else {
-            store.logRecipe(recipe, items: chosen, mealType: mealType, date: date)
+            store.logRecipe(recipe, items: chosen, mealType: mealType, date: logDate)
             AppAnalytics.log(.entryLogged(source: .recipe, mealType: mealType))
         }
         onDone()

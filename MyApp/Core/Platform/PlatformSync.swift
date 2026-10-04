@@ -907,11 +907,11 @@ final class PlatformSyncManager {
     }
 
     /// `yyyy-MM-dd` of a local day; plans that "always applied" (`.distantPast`) become 2000-01-01.
-    static func dayString(_ date: Date) -> String {
+    nonisolated static func dayString(_ date: Date) -> String {
         dayFormatter.string(from: max(date, dayFormatter.date(from: "2000-01-01") ?? date))
     }
 
-    fileprivate static let dayFormatter: DateFormatter = {
+    nonisolated fileprivate static let dayFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.calendar = Calendar(identifier: .gregorian)
         formatter.locale = Locale(identifier: "en_US_POSIX")

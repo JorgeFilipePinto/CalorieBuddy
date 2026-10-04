@@ -123,7 +123,7 @@ enum MealPlanSeed {
                 ),
                 PlannedMeal(
                     name: "Meio da Manhã",
-                    mealType: .snack,
+                    mealType: .morningSnack,
                     proteinTarget: 23, carbsTarget: 25,
                     notes: "1 fruta (≈25 g HC) + iogurte proteico, proteína em pó ou leite proteico (≈23 g proteína).",
                     options: [
@@ -161,7 +161,7 @@ enum MealPlanSeed {
                 ),
                 PlannedMeal(
                     name: "Noite",
-                    mealType: .snack,
+                    mealType: .supper,
                     notes: "Só se treinares de tarde.",
                     options: [MealPlanOption(label: "Psyllium", details: "1 c. chá psyllium", recipeID: psylliumNoite)]
                 )

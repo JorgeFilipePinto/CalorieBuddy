@@ -240,7 +240,7 @@ private struct RecipeComponentPickerView: View {
                 }
             }
             .navigationDestination(isPresented: $showingAmounts) {
-                FoodAmountsView(foodIDs: selection, confirmTitle: "Adicionar") { items, _ in
+                FoodAmountsView(foodIDs: selection, confirmTitle: "Adicionar") { items, _, _ in
                     for item in items { onAdd(item.foodItemID, item.quantity) }
                     dismiss()
                 }

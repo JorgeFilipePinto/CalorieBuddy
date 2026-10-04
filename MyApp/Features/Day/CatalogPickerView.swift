@@ -25,8 +25,9 @@ struct CatalogPickerView: View {
                     }
                 }
                 .navigationDestination(isPresented: $showingAmounts) {
-                    FoodAmountsView(foodIDs: selection, confirmTitle: "Registar", initialMeal: MealType.suggested(for: date)) { items, meal in
-                        store.logFoodItems(items, mealType: meal, date: date)
+                    FoodAmountsView(foodIDs: selection, confirmTitle: "Registar", initialMeal: MealType.suggested(for: date),
+                                    date: date) { items, meal, loggedAt in
+                        store.logFoodItems(items, mealType: meal, date: loggedAt)
                         for _ in items { AppAnalytics.log(.entryLogged(source: .catalog, mealType: meal)) }
                         dismiss()
                     }

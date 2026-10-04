@@ -96,7 +96,7 @@ struct HistoryView: View {
         values.isEmpty ? nil : Int((values.reduce(0, +) / Double(values.count)).rounded())
     }
 
-    private static func monthStart(of date: Date) -> Date {
+    nonisolated private static func monthStart(of date: Date) -> Date {
         Calendar.current.dateInterval(of: .month, for: date)?.start ?? Calendar.current.startOfDay(for: date)
     }
 

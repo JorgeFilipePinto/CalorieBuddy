@@ -116,20 +116,24 @@ struct FoodAmountsView: View {
     let confirmTitle: String
     /// Shows the meal picker (logging to the diary); `nil` = no meal (adding to a recipe).
     let initialMeal: MealType?
-    let onConfirm: (_ items: [RecipeItem], _ meal: MealType) -> Void
+    let onConfirm: (_ items: [RecipeItem], _ meal: MealType, _ date: Date) -> Void
 
     @State private var foodIDs: [UUID]
     @State private var amounts: [UUID: String] = [:]
     @State private var mealType: MealType
+    /// When it was eaten (shown with the meal, when logging).
+    @State private var logDate: Date
     @State private var didLoad = false
 
-    init(foodIDs: [UUID], confirmTitle: String, initialMeal: MealType? = nil,
-         onConfirm: @escaping (_ items: [RecipeItem], _ meal: MealType) -> Void) {
+    /// `date`: the day logged on (for today, the current time is used instead of midnight).
+    init(foodIDs: [UUID], confirmTitle: String, initialMeal: MealType? = nil, date: Date = .now,
+         onConfirm: @escaping (_ items: [RecipeItem], _ meal: MealType, _ date: Date) -> Void) {
         _foodIDs = State(initialValue: foodIDs)
         self.confirmTitle = confirmTitle
         self.initialMeal = initialMeal
         self.onConfirm = onConfirm
         _mealType = State(initialValue: initialMeal ?? .snack)
+        _logDate = State(initialValue: Calendar.current.isDateInToday(date) ? .now : date)
     }
 
     /// The typed amounts as doses; foods at 0 (or unreadable) are left out.
@@ -166,12 +170,13 @@ struct FoodAmountsView: View {
             }
 
             if initialMeal != nil {
-                Section("Refeição") {
+                Section("Registo") {
                     Picker("Refeição", selection: $mealType) {
                         ForEach(MealType.allCases) { meal in
                             Label(meal.displayName, systemImage: meal.symbolName).tag(meal)
                         }
                     }
+                    DatePicker("Data", selection: $logDate)
                 }
             }
         }
@@ -185,7 +190,7 @@ struct FoodAmountsView: View {
         }
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
-                Button(confirmTitle) { onConfirm(items, mealType) }
+                Button(confirmTitle) { onConfirm(items, mealType, logDate) }
                     .disabled(items.isEmpty)
             }
         }

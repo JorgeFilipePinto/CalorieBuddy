@@ -1,36 +1,58 @@
 import Foundation
 
+/// The diary's meal stages, in the order of the day. The raw values are what the platform stores
+/// (`food_entries.meal`); `snack` keeps its original value and is the afternoon snack ("Lanche").
 enum MealType: String, Codable, CaseIterable, Identifiable {
-    case breakfast, lunch, dinner, snack
+    case breakfast
+    case morningSnack = "morning_snack"
+    case preWorkout = "pre_workout"
+    case postWorkout = "post_workout"
+    case lunch
+    case snack
+    case dinner
+    case supper
 
     var id: String { rawValue }
 
     var displayName: String {
         switch self {
         case .breakfast: return "Pequeno-almoço"
+        case .morningSnack: return "Meio da Manhã"
+        case .preWorkout: return "Pré-treino"
+        case .postWorkout: return "Pós-treino"
         case .lunch: return "Almoço"
+        case .snack: return "Lanche"
         case .dinner: return "Jantar"
-        case .snack: return "Snack"
+        case .supper: return "Ceia"
         }
     }
 
     var symbolName: String {
         switch self {
         case .breakfast: return "sunrise"
+        case .morningSnack: return "cup.and.saucer"
+        case .preWorkout: return "bolt.heart"
+        case .postWorkout: return "figure.cooldown"
         case .lunch: return "sun.max"
+        case .snack: return "takeoutbag.and.cup.and.straw"
         case .dinner: return "moon.stars"
-        case .snack: return "carrot"
+        case .supper: return "moon.zzz"
         }
     }
 
     /// A reasonable default meal for the time of day, used to pre-select the meal when
-    /// logging an entry so the user usually doesn't have to change it.
+    /// logging an entry so the user usually doesn't have to change it. Pre- and post-workout
+    /// depend on when the training is, so they're always picked by hand.
     static func suggested(for date: Date) -> MealType {
-        switch Calendar.current.component(.hour, from: date) {
-        case 5..<11: return .breakfast
-        case 11..<15: return .lunch
-        case 15..<19: return .snack
-        default: return .dinner
+        let calendar = Calendar.current
+        let minutes = calendar.component(.hour, from: date) * 60 + calendar.component(.minute, from: date)
+        switch minutes {
+        case 5 * 60..<10 * 60: return .breakfast
+        case 10 * 60..<12 * 60: return .morningSnack
+        case 12 * 60..<15 * 60: return .lunch
+        case 15 * 60..<18 * 60 + 30: return .snack
+        case 18 * 60 + 30..<22 * 60: return .dinner
+        default: return .supper
         }
     }
 }
