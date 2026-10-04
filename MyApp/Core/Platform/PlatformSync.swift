@@ -247,8 +247,13 @@ final class PlatformSyncManager {
                 let rows = collection.documents.compactMap { $0.value as? FoodEntry }.map { Self.foodEntryRow($0, foods: foods) }
                 for batch in rows.chunked(into: Self.batchSize) { try await client.upsert("food_entries", rows: batch, onConflict: "id") }
             case AppCollection.foodItems:
-                let rows = collection.documents.compactMap { $0.value as? FoodItem }.map(Self.foodItemRow)
+                let categoryNames = Dictionary(database.foodCategories.map { ($0.id, $0.name) }) { first, _ in first }
+                let rows = collection.documents.compactMap { $0.value as? FoodItem }.map { Self.foodItemRow($0, categoryNames: categoryNames) }
                 for batch in rows.chunked(into: Self.batchSize) { try await client.upsert("food_items", rows: batch, onConflict: "id") }
+            case AppCollection.recipes:
+                let foods = Dictionary(database.foodItems.map { ($0.id, $0) }) { first, _ in first }
+                let rows = collection.documents.compactMap { $0.value as? Recipe }.map { Self.recipeRow($0, foods: foods) }
+                for batch in rows.chunked(into: Self.batchSize) { try await client.upsert("recipes", rows: batch, onConflict: "id") }
             case AppCollection.progressPhotos:
                 let rows = collection.documents.compactMap { $0.value as? ProgressPhoto }.map(Self.progressPhotoRow)
                 for batch in rows.chunked(into: Self.batchSize) { try await client.upsert("progress_photos", rows: batch, onConflict: "id") }
@@ -582,6 +587,11 @@ final class PlatformSyncManager {
         let resendTypedRows = (state.typedRowsVersion ?? 0) < PlatformSyncState.currentTypedRowsVersion
 
         var counts = (entries: 0, other: 0)
+        /// Set when a food category changed: the foods' rows carry its name.
+        var resendFoods = false
+        /// Set when a food changed: recipes' rows carry amounts worked out from the foods' doses.
+        var resendRecipes = false
+        let categoryNames = Dictionary(database.foodCategories.map { ($0.id, $0.name) }) { first, _ in first }
         for collection in AppCollection.all(of: database) {
             let previous = state.documentHashes[collection.name] ?? [:]
             var current: [String: String] = [:]
@@ -592,7 +602,17 @@ final class PlatformSyncManager {
                 if previous[document.id] != hash { changed.append(document) }
             }
             let deleted = previous.keys.filter { current[$0] == nil }
-            let typed = resendTypedRows && collection.name != AppCollection.entries ? collection.documents : changed
+            var typed = resendTypedRows && collection.name != AppCollection.entries ? collection.documents : changed
+            if collection.name == AppCollection.foodCategories, !changed.isEmpty || !deleted.isEmpty { resendFoods = true }
+            if collection.name == AppCollection.foodItems, resendFoods { typed = collection.documents }
+            if collection.name == AppCollection.foodItems, !changed.isEmpty || !deleted.isEmpty { resendRecipes = true }
+            if collection.name == AppCollection.recipes, resendRecipes { typed = collection.documents }
+            // The diary is too big to re-send whole: on a new row version only the entries logged
+            // from a recipe go again (they gained recipe_id).
+            if collection.name == AppCollection.entries, resendTypedRows {
+                let changedIDs = Set(changed.map(\.id))
+                typed = changed + collection.documents.filter { ($0.value as? FoodEntry)?.recipeID != nil && !changedIDs.contains($0.id) }
+            }
 
             // Typed rows first, so the dashboard has them even if the backup part fails.
             switch collection.name {
@@ -604,11 +624,18 @@ final class PlatformSyncManager {
                 }
                 try await softDelete("food_entries", ids: deleted)
             case AppCollection.foodItems:
-                let rows = typed.compactMap { $0.value as? FoodItem }.map(Self.foodItemRow)
+                let rows = typed.compactMap { $0.value as? FoodItem }.map { Self.foodItemRow($0, categoryNames: categoryNames) }
                 for batch in rows.chunked(into: Self.batchSize) {
                     try await client.upsert("food_items", rows: batch, onConflict: "id")
                 }
                 try await softDelete("food_items", ids: deleted)
+            case AppCollection.recipes:
+                let foods = Dictionary(database.foodItems.map { ($0.id, $0) }) { first, _ in first }
+                let rows = typed.compactMap { $0.value as? Recipe }.map { Self.recipeRow($0, foods: foods) }
+                for batch in rows.chunked(into: Self.batchSize) {
+                    try await client.upsert("recipes", rows: batch, onConflict: "id")
+                }
+                try await softDelete("recipes", ids: deleted)
             case AppCollection.progressPhotos:
                 let rows = typed.compactMap { $0.value as? ProgressPhoto }.map(Self.progressPhotoRow)
                 for batch in rows.chunked(into: Self.batchSize) {
@@ -756,6 +783,7 @@ final class PlatformSyncManager {
             "unit": amount.flatMap { $0 > 0 ? amountUnit : nil } ?? NSNull(),
             "barcode": entry.barcode ?? NSNull(),
             "group_id": entry.groupID?.uuidString ?? NSNull(),
+            "recipe_id": entry.recipeID?.uuidString ?? NSNull(),
             "group_name": entry.groupName ?? NSNull(),
             "source": "ios_app",
             "deleted_at": NSNull()
@@ -764,7 +792,7 @@ final class PlatformSyncManager {
 
     /// A catalog food as the dashboard's `food_items` row: nutrition per 100 g/ml (or per unit),
     /// whatever basis and dose the app stores it with.
-    private static func foodItemRow(_ item: FoodItem) -> [String: Any] {
+    private static func foodItemRow(_ item: FoodItem, categoryNames: [UUID: String]) -> [String: Any] {
         let isCounted = item.unit.baseUnit == .unit
         let dose = item.baseDoseAmount > 0 ? item.baseDoseAmount : 1
         let factor: Double = switch item.nutritionBasis {
@@ -788,6 +816,34 @@ final class PlatformSyncManager {
                 .filter { $0.value.isFinite && $0.value >= 0 }
                 .mapValues { $0 * factor },
             "photo_path": item.photoID.map { photoPath("food", $0) } ?? NSNull(),
+            // The rest of the food, for its page on the dashboard.
+            "dose_size": clamp(item.baseDoseAmount, max: 99_999_999),
+            "barcodes": item.barcodes,
+            "category": item.categoryID.flatMap { categoryNames[$0] } ?? NSNull(),
+            "label_photo_paths": item.labelPhotoIDs.map { photoPath("food", $0) },
+            "source": "ios_app",
+            "deleted_at": NSNull()
+        ]
+    }
+
+    /// A recipe as the dashboard's `recipes` row: its ingredients with the default amount for one
+    /// portion in g / ml / units (foods no longer in the catalog left out), and its photos.
+    private static func recipeRow(_ recipe: Recipe, foods: [UUID: FoodItem]) -> [String: Any] {
+        let items: [[String: Any]] = recipe.items.compactMap { item in
+            guard let food = foods[item.foodItemID] else { return nil }
+            let unit: String = switch food.unit.baseUnit {
+            case .milliliter: "ml"
+            case .unit: "unit"
+            default: "g"
+            }
+            return ["food_item_id": food.id.uuidString, "amount": clamp(item.quantity * food.baseDoseAmount, max: 999_999), "unit": unit]
+        }
+        return [
+            "id": recipe.id.uuidString,
+            "name": recipe.name,
+            "items": items,
+            "photo_path": recipe.photoID.map { photoPath("recipe", $0) } ?? NSNull(),
+            "label_photo_paths": recipe.labelPhotoIDs.map { photoPath("recipe", $0) },
             "source": "ios_app",
             "deleted_at": NSNull()
         ]
@@ -1017,10 +1073,11 @@ private struct AppCollection {
 
     static func all(of database: AppDatabase) -> [AppCollection] {
         [
-            // Foods before the diary: an entry's typed row points at its food's (food_item_id).
+            // Categories before foods (a renamed category re-sends its foods' rows); foods before
+            // the diary: an entry's typed row points at its food's (food_item_id).
+            AppCollection(foodCategories, database.foodCategories),
             AppCollection(foodItems, database.foodItems),
             AppCollection(entries, database.entries),
-            AppCollection(foodCategories, database.foodCategories),
             AppCollection(recipes, database.recipes),
             AppCollection(stores, database.stores),
             AppCollection(supplementCategories, database.supplementCategories),
@@ -1058,7 +1115,7 @@ private struct PlatformSyncState: Codable {
     /// record once. 1: food_items.photo_path and progress_photos. 2: the full nutrition label
     /// (sugars, saturated fat, fibre, salt, micronutrients — migration nutrition_details).
     /// 3: supplements (migration supplements_catalog) and food_entries.food_item_id/quantity.
-    static let currentTypedRowsVersion = 3
+    static let currentTypedRowsVersion = 4
 
     /// One file per server: a Debug build (local Supabase) and a Release build (the VPS) on the
     /// same iPhone must not share what they think was already sent.
