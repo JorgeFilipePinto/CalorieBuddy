@@ -56,6 +56,36 @@ enum SupabaseError: LocalizedError {
     }
 }
 
+enum PasswordChangeError: LocalizedError {
+    case wrongCurrentPassword
+    case samePassword
+    case weak(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .wrongCurrentPassword: "A palavra-passe atual não está correta."
+        case .samePassword: "A nova palavra-passe tem de ser diferente da atual."
+        case .weak(let message): "A plataforma recusou a nova palavra-passe por ser fraca. (\(message))"
+        }
+    }
+}
+
+/// The platform's password rules (Api `config.toml` / `GOTRUE_PASSWORD_*` in the VPS compose
+/// file): at least 10 characters with lowercase and uppercase letters and a digit. Checked in the
+/// app to guide the user; the Auth server enforces them anyway.
+nonisolated enum PasswordRules {
+    static let minimumLength = 10
+
+    static func unmet(_ password: String) -> [String] {
+        var missing: [String] = []
+        if password.count < minimumLength { missing.append("Pelo menos \(minimumLength) caracteres") }
+        if !password.contains(where: { $0.isASCII && $0.isLowercase }) { missing.append("Uma letra minúscula") }
+        if !password.contains(where: { $0.isASCII && $0.isUppercase }) { missing.append("Uma letra maiúscula") }
+        if !password.contains(where: { $0.isASCII && $0.isNumber }) { missing.append("Um algarismo") }
+        return missing
+    }
+}
+
 /// The signed-in platform user, kept in the Keychain across launches.
 struct SupabaseSession: Codable {
     var accessToken: String
@@ -108,6 +138,31 @@ final class SupabaseClient {
         if String(data: canWrite, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) != "true" {
             await signOut()
             throw SupabaseError.notAthlete
+        }
+    }
+
+    /// Changes the signed-in user's password. The current password is checked first by signing in
+    /// with it (a stolen unlocked phone alone can't change it); the session from that sign-in —
+    /// the same user — replaces the stored one. The new password must meet the Auth server's
+    /// rules (`PasswordRules`), which answer `weak_password` / `same_password` otherwise.
+    func changePassword(current: String, new: String) async throws {
+        guard let email = session?.email, let userID = session?.userID else { throw SupabaseError.notSignedIn }
+        let credentials = try JSONSerialization.data(withJSONObject: ["email": email, "password": current])
+        let verified: SupabaseSession
+        do {
+            let data = try await send("POST", "/auth/v1/token", query: [URLQueryItem(name: "grant_type", value: "password")],
+                                      body: credentials, authorized: false)
+            verified = try Self.session(fromTokenResponse: data)
+        } catch SupabaseError.server(let status, let code, _) where status == 400 && code == "invalid_credentials" {
+            throw PasswordChangeError.wrongCurrentPassword
+        }
+        guard verified.userID == userID else { throw SupabaseError.invalidResponse }
+        store(verified)
+
+        do {
+            _ = try await send("PUT", "/auth/v1/user", body: JSONSerialization.data(withJSONObject: ["password": new]))
+        } catch SupabaseError.server(_, let code, let message) where code == "same_password" || code == "weak_password" {
+            throw code == "same_password" ? PasswordChangeError.samePassword : PasswordChangeError.weak(message)
         }
     }
 

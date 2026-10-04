@@ -27,6 +27,11 @@ struct PlatformSyncView: View {
             } else if let session = client.session {
                 Section {
                     LabeledContent("Conta", value: session.email ?? "—")
+                    NavigationLink {
+                        ChangePasswordView()
+                    } label: {
+                        Label("Alterar Palavra-passe", systemImage: "key")
+                    }
                     Button("Terminar Sessão", role: .destructive) {
                         showSignOutConfirmation = true
                     }
