@@ -1,97 +1,36 @@
 import SwiftUI
 
-/// Quick-log sheet: pick a catalog food, a quantity and a meal, and log it in one step.
+/// Quick-log sheet: search the catalog and pick one or several foods, then say how much of each
+/// and the meal — they're all logged at once.
 struct CatalogPickerView: View {
     @Environment(DataStore.self) private var store
     @Environment(\.dismiss) private var dismiss
 
     let date: Date
 
-    @State private var selectedItem: FoodItem?
-    @State private var quantityText = "1"
-    @State private var mealType: MealType
-
-    init(date: Date) {
-        self.date = date
-        _mealType = State(initialValue: MealType.suggested(for: date))
-    }
-
-    private var quantity: Double? {
-        Double(quantityText.replacingOccurrences(of: ",", with: "."))
-    }
-
-    private var scaledCalories: Int? {
-        guard let selectedItem, let quantity else { return nil }
-        return selectedItem.scaledCalories(quantity: quantity)
-    }
+    @State private var selection: [UUID] = []
+    @State private var showingAmounts = false
 
     var body: some View {
         NavigationStack {
-            Form {
-                UsageSuggestionsSection(
-                    suggestions: { store.suggestedFoodItems($0) },
-                    title: { item in item.brand.map { "\(item.name) (\($0))" } ?? item.name },
-                    subtitle: { "dose \($0.doseLabel) · \($0.scaledCalories(quantity: 1)) kcal" },
-                    isSelected: { $0.id == selectedItem?.id },
-                    select: { selectedItem = $0 }
-                )
-                Section("Alimento") {
-                    if store.foodItems.isEmpty {
-                        ContentUnavailableView(
-                            "Catálogo vazio",
-                            systemImage: "tray",
-                            description: Text("Adiciona alimentos no separador Alimentos.")
-                        )
-                    } else {
-                        Picker("Alimento", selection: $selectedItem) {
-                            Text("Escolhe...").tag(FoodItem?.none)
-                            ForEach(store.foodItems) { item in
-                                Text(item.name).tag(Optional(item))
-                            }
-                        }
+            FoodSelectionList(selection: $selection)
+                .navigationTitle("Do Catálogo")
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancelar") { dismiss() }
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button(selection.isEmpty ? "Seguinte" : "Seguinte (\(selection.count))") { showingAmounts = true }
+                            .disabled(selection.isEmpty)
                     }
                 }
-
-                if let selectedItem {
-                    Section("Quantidade") {
-                        HStack {
-                            Text("Doses (\(selectedItem.doseLabel))")
-                            Spacer()
-                            TextField("1", text: $quantityText)
-                                .keyboardType(.decimalPad)
-                                .multilineTextAlignment(.trailing)
-                                .frame(width: 80)
-                        }
-                        if let scaledCalories {
-                            Text("\(scaledCalories) kcal")
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-
-                Section("Refeição") {
-                    Picker("Refeição", selection: $mealType) {
-                        ForEach(MealType.allCases) { meal in
-                            Label(meal.displayName, systemImage: meal.symbolName).tag(meal)
-                        }
-                    }
-                }
-            }
-            .navigationTitle("Do Catálogo")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancelar") { dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Registar") {
-                        guard let selectedItem, let quantity else { return }
-                        store.logFoodItem(selectedItem, quantity: quantity, mealType: mealType, date: date)
-                        AppAnalytics.log(.entryLogged(source: .catalog, mealType: mealType))
+                .navigationDestination(isPresented: $showingAmounts) {
+                    FoodAmountsView(foodIDs: selection, confirmTitle: "Registar", initialMeal: MealType.suggested(for: date)) { items, meal in
+                        store.logFoodItems(items, mealType: meal, date: date)
+                        for _ in items { AppAnalytics.log(.entryLogged(source: .catalog, mealType: meal)) }
                         dismiss()
                     }
-                    .disabled(selectedItem == nil || quantity == nil)
                 }
-            }
         }
     }
 }

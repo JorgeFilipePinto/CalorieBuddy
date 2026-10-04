@@ -270,6 +270,12 @@ protocol Favoritable {
     var name: String { get }
     var isFavorite: Bool { get set }
     var createdAt: Date { get }
+    /// What a search looks in (the name; foods add their brand and barcodes).
+    var searchFields: [String] { get }
+}
+
+extension Favoritable {
+    var searchFields: [String] { [name] }
 }
 
 /// How a list of `Favoritable` items can be sorted.
@@ -287,10 +293,10 @@ enum ItemSortOrder: String, CaseIterable, Identifiable {
 }
 
 extension Array where Element: Favoritable {
-    /// Keeps items whose name *contains* `searchText` (not an exact match), case-insensitively,
-    /// then sorts by the given order.
+    /// Keeps items matching `searchText` (every word, anywhere in `searchFields`, ignoring case and
+    /// accents), then sorts by the given order.
     func filteredAndSorted(searchText: String, order: ItemSortOrder) -> [Element] {
-        let filtered = searchText.isEmpty ? self : filter { $0.name.localizedCaseInsensitiveContains(searchText) }
+        let filtered = searchText.isEmpty ? self : filter { SearchMatch.matches(searchText, in: $0.searchFields) }
         switch order {
         case .name:
             return filtered.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
@@ -531,6 +537,8 @@ extension FoodItem {
 
     /// Size of one dose in the base unit (g, ml or units).
     var baseDoseAmount: Double { doseSize * unit.baseMultiplier }
+
+    var searchFields: [String] { [name, brand ?? ""] + barcodes }
 
     /// How many doses of this food provide the same amount of `macro` as `quantity` doses of
     /// `other`, rounded to a practical amount (5 g/ml steps, or half units). `nil` when this food

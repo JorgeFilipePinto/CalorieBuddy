@@ -10,6 +10,10 @@ struct RecipesListView: View {
     @State private var recipeToEdit: Recipe?
     @State private var searchText = ""
     @State private var sortOrder: ItemSortOrder = .name
+    /// Multi-select mode: rows toggle a check mark instead of opening the editor.
+    @State private var isSelecting = false
+    @State private var selectedIDs: Set<UUID> = []
+    @State private var confirmingDelete = false
 
     private var currencyCode: String { Locale.current.currency?.identifier ?? "EUR" }
 
@@ -71,10 +75,47 @@ struct RecipesListView: View {
                 }
             }
         }
-        .navigationTitle("Receitas")
+        .safeAreaInset(edge: .bottom) {
+            if isSelecting {
+                SelectionDeleteBar(count: selectedIDs.count, noun: ("receita", "receitas")) { confirmingDelete = true }
+            }
+        }
+        .confirmationDialog(
+            selectedIDs.count == 1 ? "Eliminar 1 receita?" : "Eliminar \(selectedIDs.count) receitas?",
+            isPresented: $confirmingDelete,
+            titleVisibility: .visible
+        ) {
+            Button("Eliminar", role: .destructive) {
+                store.deleteRecipes(withIDs: selectedIDs)
+                Haptics.light()
+                selectedIDs = []
+                isSelecting = false
+            }
+        } message: {
+            Text("Os alimentos do catálogo e o que já está registado no diário mantêm-se. Opções do plano alimentar ligadas a elas ficam por ligar.")
+        }
+        .navigationTitle(isSelecting ? "\(selectedIDs.count) Selecionadas" : "Receitas")
         .trackScreen("Receitas")
         .searchable(text: $searchText, prompt: "Procurar por nome")
         .toolbar {
+            if isSelecting {
+                ToolbarItem(placement: .topBarLeading) {
+                    let allVisible = Set(visibleRecipes.map(\.id))
+                    Button(allVisible.isSubset(of: selectedIDs) ? "Nenhuma" : "Todas") {
+                        selectedIDs = allVisible.isSubset(of: selectedIDs) ? [] : allVisible
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("OK") {
+                        isSelecting = false
+                        selectedIDs = []
+                    }
+                }
+            } else {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Selecionar") { isSelecting = true }
+                    .disabled(store.recipes.isEmpty)
+            }
             ToolbarItem(placement: .topBarLeading) {
                 Picker("Ordenar por", selection: $sortOrder) {
                     ForEach(ItemSortOrder.allCases) { order in
@@ -99,6 +140,7 @@ struct RecipesListView: View {
                 } label: {
                     Image(systemName: "plus")
                 }
+            }
             }
         }
         .sheet(isPresented: $showingAddRecipe) {
@@ -141,9 +183,17 @@ struct RecipesListView: View {
 
     private func row(for recipe: Recipe) -> some View {
         Button {
-            recipeToEdit = recipe
+            if isSelecting {
+                if selectedIDs.contains(recipe.id) { selectedIDs.remove(recipe.id) } else { selectedIDs.insert(recipe.id) }
+                Haptics.light()
+            } else {
+                recipeToEdit = recipe
+            }
         } label: {
             HStack {
+                if isSelecting {
+                    SelectionMark(isSelected: selectedIDs.contains(recipe.id))
+                }
                 PhotoThumbnail(photoID: recipe.photoID, placeholder: "fork.knife")
                 VStack(alignment: .leading) {
                     HStack(spacing: 4) {
@@ -157,23 +207,30 @@ struct RecipesListView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Image(systemName: "chevron.right").foregroundStyle(.tertiary)
+                if !isSelecting {
+                    Image(systemName: "chevron.right").foregroundStyle(.tertiary)
+                }
             }
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .swipeActions(edge: .leading) {
+            if !isSelecting {
             Button {
                 store.toggleFavorite(recipe)
             } label: {
                 Label(recipe.isFavorite ? "Remover Favorito" : "Favorito", systemImage: recipe.isFavorite ? "star.slash" : "star.fill")
             }
             .tint(.yellow)
+            }
         }
         .swipeActions(edge: .trailing) {
-            Button(role: .destructive) {
-                store.deleteRecipe(recipe)
-            } label: {
-                Label("Eliminar", systemImage: "trash")
+            if !isSelecting {
+                Button(role: .destructive) {
+                    store.deleteRecipe(recipe)
+                } label: {
+                    Label("Eliminar", systemImage: "trash")
+                }
             }
         }
     }

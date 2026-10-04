@@ -693,6 +693,21 @@ final class DataStore {
         persistActive()
     }
 
+    /// Logs several catalog foods at once (`items`: food + doses), in one save.
+    func logFoodItems(_ items: [RecipeItem], mealType: MealType, date: Date) {
+        let newEntries: [FoodEntry] = items.compactMap { line in
+            guard line.quantity > 0, let item = foodItems.first(where: { $0.id == line.foodItemID }) else { return nil }
+            var entry = FoodEntry(name: item.name, nutrition: item.nutrition(quantity: line.quantity), mealType: mealType,
+                                  date: date, barcode: item.barcodes.first)
+            entry.foodItemID = item.id
+            entry.quantity = line.quantity
+            return entry
+        }
+        guard !newEntries.isEmpty else { return }
+        entries.append(contentsOf: newEntries)
+        persistActive()
+    }
+
     /// Logs one dose-scaled entry from a catalog food item.
     func logFoodItem(_ item: FoodItem, quantity: Double, mealType: MealType, date: Date) {
         var entry = FoodEntry(
@@ -864,9 +879,15 @@ final class DataStore {
     }
 
     func deleteFoodItem(_ item: FoodItem) {
-        foodItems.removeAll { $0.id == item.id }
+        deleteFoodItems(withIDs: [item.id])
+    }
+
+    /// Deletes several foods at once (and takes them out of every recipe), in one save.
+    func deleteFoodItems(withIDs ids: Set<UUID>) {
+        guard !ids.isEmpty else { return }
+        foodItems.removeAll { ids.contains($0.id) }
         for index in recipes.indices {
-            recipes[index].items.removeAll { $0.foodItemID == item.id }
+            recipes[index].items.removeAll { ids.contains($0.foodItemID) }
         }
         persistActive()
     }
@@ -919,7 +940,13 @@ final class DataStore {
     }
 
     func deleteRecipe(_ recipe: Recipe) {
-        recipes.removeAll { $0.id == recipe.id }
+        deleteRecipes(withIDs: [recipe.id])
+    }
+
+    /// Deletes several recipes at once, in one save.
+    func deleteRecipes(withIDs ids: Set<UUID>) {
+        guard !ids.isEmpty else { return }
+        recipes.removeAll { ids.contains($0.id) }
         persistActive()
     }
 
