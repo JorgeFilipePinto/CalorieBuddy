@@ -152,7 +152,7 @@ struct AccessLink: Identifiable, Equatable, Decodable {
 
     /// Postgres timestamps can carry microseconds ("…:21.576124+00:00"); keep milliseconds, which
     /// the ISO-8601 parser reads.
-    static func date(fromPostgres string: String) -> Date? {
+    nonisolated static func date(fromPostgres string: String) -> Date? {
         let trimmed = string.replacingOccurrences(of: #"(\.\d{3})\d+"#, with: "$1", options: .regularExpression)
         return SupabaseClient.date(fromTimestamp: trimmed)
     }
@@ -181,7 +181,7 @@ enum AccessLinkValidity: Int, CaseIterable, Identifiable {
 struct DashboardAccessService {
     let client: SupabaseClient
 
-    private static let function = "invite-user"
+    nonisolated private static let function = "invite-user"
     private static let linksFunction = "access-links"
 
     func people() async throws -> [DashboardPerson] {

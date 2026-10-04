@@ -75,11 +75,10 @@ struct SupplementPickerView: View {
                                 description: Text("Adiciona suplementos no separador Alimentos.")
                             )
                         } else {
-                            Picker("Suplemento", selection: $selectedSupplementID) {
-                                Text("Escolhe...").tag(UUID?.none)
-                                ForEach(store.supplements) { supplement in
-                                    Text(supplement.name).tag(Optional(supplement.id))
-                                }
+                            NavigationLink {
+                                SupplementSearchList(selection: $selectedSupplementID)
+                            } label: {
+                                LabeledContent("Suplemento", value: selectedSupplement?.name ?? "Escolhe…")
                             }
                         }
                     }
@@ -278,4 +277,70 @@ private struct StockChoiceView: View {
 #Preview {
     SupplementPickerView(date: .now)
         .environment(DataStore())
+}
+
+/// Searchable list of the supplements, grouped by their category (favourites first), with what's
+/// left in stock — tapping one picks it and goes back.
+struct SupplementSearchList: View {
+    @Environment(DataStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+
+    @Binding var selection: UUID?
+
+    @State private var searchText = ""
+
+    private var groups: [(id: String, title: String, items: [Supplement])] {
+        let visible = store.supplements.filter { supplement in
+            SearchMatch.matches(searchText, in: [supplement.name, store.supplementCategory(withID: supplement.categoryID)?.name ?? ""])
+        }
+        .filteredAndSorted(searchText: "", order: .name)
+        var groups: [(id: String, title: String, items: [Supplement])] = []
+        let favorites = visible.filter(\.isFavorite)
+        if !favorites.isEmpty { groups.append(("favorites", "Favoritos", favorites)) }
+        let others = visible.filter { !$0.isFavorite }
+        for category in store.supplementCategories {
+            let items = others.filter { $0.categoryID == category.id }
+            if !items.isEmpty { groups.append((category.id.uuidString, category.name, items)) }
+        }
+        let known = Set(store.supplementCategories.map(\.id))
+        let rest = others.filter { !known.contains($0.categoryID) }
+        if !rest.isEmpty { groups.append(("none", "Outros", rest)) }
+        return groups
+    }
+
+    var body: some View {
+        List {
+            if groups.isEmpty {
+                ContentUnavailableView.search(text: searchText)
+            }
+            ForEach(groups, id: \.id) { group in
+                Section("\(group.title) (\(group.items.count))") {
+                    ForEach(group.items) { supplement in
+                        Button {
+                            selection = supplement.id
+                            dismiss()
+                        } label: {
+                            HStack {
+                                PhotoThumbnail(photoID: supplement.photoID, placeholder: "pills.fill")
+                                VStack(alignment: .leading) {
+                                    Text(supplement.name)
+                                    Text("dose \(supplement.doseLabel) · \(RecipeIngredientEditorView.number(supplement.doses(in: supplement.totalRemaining))) doses em stock")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                if selection == supplement.id {
+                                    Image(systemName: "checkmark").foregroundStyle(.tint)
+                                }
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+        .navigationTitle("Suplemento")
+        .searchable(text: $searchText, prompt: "Procurar suplemento ou categoria")
+    }
 }

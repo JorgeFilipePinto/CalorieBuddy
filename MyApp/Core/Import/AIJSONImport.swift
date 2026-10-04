@@ -107,8 +107,18 @@ struct FoodImportPayload: Codable {
     var salt: Double?
     var minerals: [NutrientImportPayload]?
     var vitamins: [NutrientImportPayload]?
+    /// One of the catalog's food categories, by name (matched leniently; unknown names are ignored).
+    var category: String?
+    /// The EAN printed on the package, when the AI could read it from a photo.
+    var barcode: String?
 
     var resolvedUnit: MeasurementUnit { parseMeasurementUnit(unit) }
+
+    /// Just the digits of `barcode`, when it looks like a real code (8–14 digits).
+    var resolvedBarcode: String? {
+        let digits = (barcode ?? "").filter(\.isNumber)
+        return (8...14).contains(digits.count) ? digits : nil
+    }
     var resolvedNutritionBasis: NutritionBasis { parseNutritionBasis(nutritionBasis) }
 
     func makeFoodItem() -> FoodItem {
@@ -157,11 +167,19 @@ extension FoodImportPayload {
         salt = try container.lenientDouble(forKey: .salt)
         minerals = try container.decodeIfPresent([NutrientImportPayload].self, forKey: .minerals)
         vitamins = try container.decodeIfPresent([NutrientImportPayload].self, forKey: .vitamins)
+        category = try? container.decodeIfPresent(String.self, forKey: .category)
+        // A barcode sometimes comes back as a bare number.
+        barcode = (try? container.decodeIfPresent(String.self, forKey: .barcode))
+            ?? (try? container.decodeIfPresent(Int64.self, forKey: .barcode)).flatMap { $0.map(String.init) }
     }
 }
 
 struct RecipeItemImportPayload: Codable {
     var food: FoodImportPayload
+    /// How much of the ingredient one portion takes, in the food's unit (g, ml or units) — what the
+    /// prompt asks for.
+    var amount: Double?
+    /// Older answers: how many of the food's doses (`doseSize`). Used only without `amount`.
     var quantity: Double?
 }
 
@@ -169,6 +187,7 @@ extension RecipeItemImportPayload {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         food = try container.decode(FoodImportPayload.self, forKey: .food)
+        amount = try container.lenientDouble(forKey: .amount)
         quantity = try container.lenientDouble(forKey: .quantity)
     }
 }
@@ -312,11 +331,18 @@ enum AIJSONImport {
     /// The JSON inside whatever the AI answered: assistants often wrap it in a ```json block or add
     /// a sentence before/after it, so everything outside the outermost `{…}`/`[…]` is dropped.
     private static func data(from text: String) throws -> Data {
+        // iOS's smart punctuation turns " into “ ” when the answer is typed or edited on the phone.
         var json = text
-        if let start = text.firstIndex(where: { $0 == "{" || $0 == "[" }),
-           let end = text.lastIndex(where: { $0 == "}" || $0 == "]" }),
+            .replacingOccurrences(of: "\u{201C}", with: "\"")
+            .replacingOccurrences(of: "\u{201D}", with: "\"")
+            .replacingOccurrences(of: "\u{201E}", with: "\"")
+            .replacingOccurrences(of: "\u{00AB}", with: "\"")
+            .replacingOccurrences(of: "\u{00BB}", with: "\"")
+        let cleaned = json
+        if let start = cleaned.firstIndex(where: { $0 == "{" || $0 == "[" }),
+           let end = cleaned.lastIndex(where: { $0 == "}" || $0 == "]" }),
            start < end {
-            json = String(text[start...end])
+            json = String(cleaned[start...end])
         }
         guard let data = json.data(using: .utf8) else { throw AIImportError.invalidJSON }
         return data
@@ -407,7 +433,13 @@ struct AIImportPrompt {
 }
 
 extension AIJSONImport {
-    static let foodPrompt = AIImportPrompt(
+    /// The categories the AI may pick from, as a prompt line (empty when there are none).
+    private static func categoryField(_ categories: [String]) -> String {
+        guard !categories.isEmpty else { return "" }
+        return "\n- category (opcional): a categoria do alimento, exatamente uma destas: " + categories.map { "\"\($0)\"" }.joined(separator: ", ") + ". Omite se nenhuma servir."
+    }
+
+    static func foodPrompt(categories: [String] = []) -> AIImportPrompt { AIImportPrompt(
         descriptionPlaceholder: "Descrição (ex.: iogurte grego natural Milbona, 150 g)",
         task: "Preciso dos valores nutricionais de um alimento para uma app de registo de nutrição. O alimento é o que eu descrever no fim (ou o da foto ou rótulo que eu enviar).",
         fields: """
@@ -421,6 +453,7 @@ extension AIJSONImport {
         - protein, carbs, fat: proteína, hidratos de carbono e lípidos, em gramas.
         - saturatedFat, sugars, fiber, salt (opcionais): lípidos saturados, açúcares, fibra e sal, em gramas, como no rótulo.
         - minerals, vitamins (opcionais): listas de { name, amount, unit }, com unit "g", "mg" ou "µg" (ex.: Potássio, Magnésio, Vitamina C, Tiamina (B1), Cafeína). Aminoácidos e substâncias de desporto também vão em "minerals" (ex.: Leucina, Isoleucina, Valina, Glutamina, Creatina, Beta-alanina, Citrulina, Taurina, L-carnitina, HMB, EPA, DHA).
+        - barcode (opcional): o código de barras (EAN, só dígitos) se estiver visível na foto da embalagem. Nunca o inventes.\(categoryField(categories))
         Se eu descrever vários alimentos, devolve um array com um objeto por alimento.
         """,
         template: """
@@ -443,21 +476,24 @@ extension AIJSONImport {
           ],
           "vitamins": [
             { "name": "<vitamina>", "amount": <quantidade>, "unit": "<g | mg | µg>" }
-          ]
+          ],
+          "barcode": "<código de barras, opcional>",
+          "category": "<categoria, opcional>"
         }
         """
-    )
+    ) }
 
-    static let recipePrompt = AIImportPrompt(
+    static func recipePrompt(categories: [String] = []) -> AIImportPrompt { AIImportPrompt(
         descriptionPlaceholder: "Descrição (ex.: arroz de pato para 4 pessoas)",
         task: "Preciso de decompor uma receita ou refeição nos alimentos que a compõem, para uma app de registo de nutrição. A receita é a que eu descrever no fim (ou a da foto que eu enviar).",
         fields: """
         Campos:
         - name (opcional): nome da receita.
-        - items: um objeto por ingrediente, com:
-          - food: o ingrediente — name, unit ("gram", "milliliter" ou "unit"), doseSize (tamanho de uma dose na unidade), nutritionBasis ("per100" se os valores forem por 100 g/ml, "perDose" se forem por uma dose), calories (kcal, inteiro), protein, carbs e fat (gramas).
-          - quantity: quantas doses (doseSize) desse ingrediente a receita leva. Ex.: com doseSize 100 g, 150 g de arroz é quantity 1.5.
-        Usa os ingredientes no estado em que são pesados (ex.: arroz cozido ou cru) e indica-o no nome.
+        - items: um objeto por ingrediente (cada ingrediente uma só vez), com:
+          - food: o ingrediente, com os mesmos campos de um alimento — name, unit ("gram", "milliliter" ou "unit"), doseSize (uma dose habitual, na unidade), nutritionBasis ("per100" para valores por 100 g/ml, "perDose" por dose; "perDose" quando unit for "unit"), calories (kcal, inteiro), protein, carbs, fat e, se souberes, saturatedFat, sugars, fiber e salt (gramas).\(categoryField(categories).replacingOccurrences(of: "\n- ", with: " Opcional também: "))
+          - amount: quanto desse ingrediente leva UMA dose individual (uma pessoa), na unidade do ingrediente — ex.: 150 para 150 g de arroz cozido, 2 para dois ovos, 5 para uma colher de chá de azeite.
+        Se a receita for para várias pessoas, divide as quantidades pelo número de pessoas: as quantidades são só o ponto de partida, a app pergunta quanto foi comido ao registar.
+        Usa os ingredientes no estado em que são pesados (ex.: arroz cozido ou cru) e indica-o no nome. Inclui gorduras de confeção (azeite, manteiga) e molhos, que são fáceis de esquecer.
         """,
         template: """
         {
@@ -472,14 +508,18 @@ extension AIJSONImport {
                 "calories": <kcal, inteiro>,
                 "protein": <gramas>,
                 "carbs": <gramas>,
-                "fat": <gramas>
+                "fat": <gramas>,
+                "saturatedFat": <gramas>,
+                "sugars": <gramas>,
+                "fiber": <gramas>,
+                "salt": <gramas>
               },
-              "quantity": <número de doses>
+              "amount": <quantidade numa dose individual, na unidade do ingrediente>
             }
           ]
         }
         """
-    )
+    ) }
 
     static let diaryPrompt = AIImportPrompt(
         descriptionPlaceholder: "Descrição (ex.: bitoque, comi metade da batata)",

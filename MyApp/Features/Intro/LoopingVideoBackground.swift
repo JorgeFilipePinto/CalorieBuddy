@@ -13,13 +13,21 @@ struct LoopingVideoBackground: UIViewRepresentable {
     var isMuted: Bool
 
     func makeUIView(context: Context) -> PlayerContainerView {
-        // `.playback` so the video's sound plays even with the silent switch on, like any other
-        // app that plays intentional foreground media (e.g. a movie trailer).
-        try? AVAudioSession.sharedInstance().setCategory(.playback)
-        try? AVAudioSession.sharedInstance().setActive(true)
-
         let view = PlayerContainerView()
-        view.start(resource: resource, fileExtension: fileExtension, isMuted: isMuted)
+        view.setMuted(isMuted)
+        let resource = resource, fileExtension = fileExtension
+        Task {
+            // `.playback` so the video's sound plays even with the silent switch on, like any other
+            // app that plays intentional foreground media (e.g. a movie trailer). Activating the
+            // session can block for a while, so it happens off the main thread (Xcode flags it as a
+            // hang risk otherwise); the video starts once it's done.
+            await Task.detached(priority: .userInitiated) {
+                let session = AVAudioSession.sharedInstance()
+                try? session.setCategory(.playback)
+                try? session.setActive(true)
+            }.value
+            view.start(resource: resource, fileExtension: fileExtension)
+        }
         return view
     }
 
@@ -32,6 +40,8 @@ struct LoopingVideoBackground: UIViewRepresentable {
         private var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
         /// Keeps the looper alive — it stops looping the moment it's deallocated.
         private var looper: AVPlayerLooper?
+        /// Wanted before the player exists (it starts once the audio session is ready).
+        private var isMuted = false
 
         override init(frame: CGRect) {
             super.init(frame: frame)
@@ -40,8 +50,8 @@ struct LoopingVideoBackground: UIViewRepresentable {
 
         required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-        func start(resource: String, fileExtension: String, isMuted: Bool) {
-            guard let url = Bundle.main.url(forResource: resource, withExtension: fileExtension) else { return }
+        func start(resource: String, fileExtension: String) {
+            guard looper == nil, let url = Bundle.main.url(forResource: resource, withExtension: fileExtension) else { return }
             let queuePlayer = AVQueuePlayer()
             queuePlayer.isMuted = isMuted
             looper = AVPlayerLooper(player: queuePlayer, templateItem: AVPlayerItem(url: url))
@@ -50,6 +60,7 @@ struct LoopingVideoBackground: UIViewRepresentable {
         }
 
         func setMuted(_ isMuted: Bool) {
+            self.isMuted = isMuted
             playerLayer.player?.isMuted = isMuted
         }
     }

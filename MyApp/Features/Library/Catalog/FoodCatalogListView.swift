@@ -12,6 +12,10 @@ struct FoodCatalogListView: View {
     @State private var sortOrder: ItemSortOrder = .name
     @State private var showingCategories = false
     @AppStorage("CalorieBuddy.catalogGroupedByCategory") private var groupedByCategory = true
+    /// Multi-select mode: rows toggle a check mark instead of opening the editor.
+    @State private var isSelecting = false
+    @State private var selectedIDs: Set<UUID> = []
+    @State private var confirmingDelete = false
 
     private var currencyCode: String { Locale.current.currency?.identifier ?? "EUR" }
 
@@ -95,10 +99,43 @@ struct FoodCatalogListView: View {
                 }
             }
         }
-        .navigationTitle("Catálogo de Alimentos")
+        .safeAreaInset(edge: .bottom) {
+            if isSelecting {
+                SelectionDeleteBar(count: selectedIDs.count, noun: ("alimento", "alimentos")) { confirmingDelete = true }
+            }
+        }
+        .confirmationDialog(
+            selectedIDs.count == 1 ? "Eliminar 1 alimento?" : "Eliminar \(selectedIDs.count) alimentos?",
+            isPresented: $confirmingDelete,
+            titleVisibility: .visible
+        ) {
+            Button("Eliminar", role: .destructive) {
+                store.deleteFoodItems(withIDs: selectedIDs)
+                Haptics.light()
+                selectedIDs = []
+                isSelecting = false
+            }
+        } message: {
+            Text("Também saem das receitas que os usam. O que já está registado no diário mantém-se.")
+        }
+        .navigationTitle(isSelecting ? "\(selectedIDs.count) Selecionados" : "Catálogo de Alimentos")
         .trackScreen("Catálogo de Alimentos")
         .searchable(text: $searchText, prompt: "Procurar por nome")
         .toolbar {
+            if isSelecting {
+                ToolbarItem(placement: .topBarLeading) {
+                    let allVisible = Set(visibleItems.map(\.id))
+                    Button(allVisible.isSubset(of: selectedIDs) ? "Nenhum" : "Todos") {
+                        selectedIDs = allVisible.isSubset(of: selectedIDs) ? [] : allVisible
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("OK") {
+                        isSelecting = false
+                        selectedIDs = []
+                    }
+                }
+            } else {
             ToolbarItem(placement: .topBarLeading) {
                 Picker("Ordenar por", selection: $sortOrder) {
                     ForEach(ItemSortOrder.allCases) { order in
@@ -106,6 +143,10 @@ struct FoodCatalogListView: View {
                     }
                 }
                 .pickerStyle(.menu)
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Selecionar") { isSelecting = true }
+                    .disabled(store.foodItems.isEmpty)
             }
             ToolbarItem(placement: .primaryAction) {
                 Menu {
@@ -131,6 +172,7 @@ struct FoodCatalogListView: View {
                     Image(systemName: "plus")
                 }
             }
+            }
         }
         .sheet(isPresented: $showingAddFoodItem) {
             FoodItemEditorView()
@@ -138,7 +180,7 @@ struct FoodCatalogListView: View {
         .sheet(isPresented: $showingJSONImport) {
             JSONImportSheet(
                 title: "Importar Alimentos",
-                prompt: AIJSONImport.foodPrompt,
+                prompt: AIJSONImport.foodPrompt(categories: store.foodCategories.map(\.name)),
                 instructions: "Útil quando não há rótulo à mão. Todos os alimentos da resposta são adicionados ao catálogo; um alimento com o mesmo nome de um já existente é mantido como está."
             ) { json in
                 let payloads = try AIJSONImport.decodeFoodItems(from: json)
@@ -158,9 +200,16 @@ struct FoodCatalogListView: View {
 
     private func row(for item: FoodItem) -> some View {
         Button {
-            foodItemToEdit = item
+            if isSelecting {
+                toggleSelection(item.id)
+            } else {
+                foodItemToEdit = item
+            }
         } label: {
             HStack {
+                if isSelecting {
+                    SelectionMark(isSelected: selectedIDs.contains(item.id))
+                }
                 PhotoThumbnail(photoID: item.photoID, placeholder: "carrot")
                 VStack(alignment: .leading) {
                     HStack(spacing: 4) {
@@ -186,25 +235,37 @@ struct FoodCatalogListView: View {
                     .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Image(systemName: "chevron.right").foregroundStyle(.tertiary)
+                if !isSelecting {
+                    Image(systemName: "chevron.right").foregroundStyle(.tertiary)
+                }
             }
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .swipeActions(edge: .leading) {
+            if !isSelecting {
             Button {
                 store.toggleFavorite(item)
             } label: {
                 Label(item.isFavorite ? "Remover Favorito" : "Favorito", systemImage: item.isFavorite ? "star.slash" : "star.fill")
             }
             .tint(.yellow)
-        }
-        .swipeActions(edge: .trailing) {
-            Button(role: .destructive) {
-                store.deleteFoodItem(item)
-            } label: {
-                Label("Eliminar", systemImage: "trash")
             }
         }
+        .swipeActions(edge: .trailing) {
+            if !isSelecting {
+                Button(role: .destructive) {
+                    store.deleteFoodItem(item)
+                } label: {
+                    Label("Eliminar", systemImage: "trash")
+                }
+            }
+        }
+    }
+
+    private func toggleSelection(_ id: UUID) {
+        if selectedIDs.contains(id) { selectedIDs.remove(id) } else { selectedIDs.insert(id) }
+        Haptics.light()
     }
 }
 

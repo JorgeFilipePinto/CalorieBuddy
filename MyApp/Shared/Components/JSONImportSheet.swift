@@ -316,7 +316,7 @@ extension JSONImportSheet where AdditionalFields == EmptyView {
 #Preview {
     JSONImportSheet(
         title: "Importar Alimento",
-        prompt: AIJSONImport.foodPrompt,
+        prompt: AIJSONImport.foodPrompt(),
         instructions: "Útil quando não há rótulo à mão."
     ) { _ in }
 }

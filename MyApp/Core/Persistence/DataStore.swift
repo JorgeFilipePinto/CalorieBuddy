@@ -73,6 +73,37 @@ final class DataStore {
         seedExampleDataIfNeeded()
         removeOrphanPhotos()
         linkDiaryEntriesToFoodsIfNeeded()
+        if moveMealPlansToMealStages() { persistActive() }
+    }
+
+    /// Meal plans written when the diary only had four meals filed mid-morning, evening and
+    /// training meals under `.snack`; by their name they move to the stage that now exists
+    /// ("Meio da Manhã" → mid-morning, "Noite"/"Ceia" → supper, "Pré-/Pós-treino"). Idempotent;
+    /// returns whether anything changed (the caller persists).
+    @discardableResult
+    private func moveMealPlansToMealStages() -> Bool {
+        var changed = false
+        for planIndex in mealPlans.indices {
+            for mealIndex in mealPlans[planIndex].meals.indices where mealPlans[planIndex].meals[mealIndex].mealType == .snack {
+                let name = SearchMatch.normalized(mealPlans[planIndex].meals[mealIndex].name)
+                let stage: MealType? = if name.contains("meio da manha") || name.contains("manha") {
+                    .morningSnack
+                } else if name.contains("noite") || name.contains("ceia") {
+                    .supper
+                } else if name.contains("pre-treino") || name.contains("pre treino") {
+                    .preWorkout
+                } else if name.contains("pos-treino") || name.contains("pos treino") {
+                    .postWorkout
+                } else {
+                    nil
+                }
+                if let stage {
+                    mealPlans[planIndex].meals[mealIndex].mealType = stage
+                    changed = true
+                }
+            }
+        }
+        return changed
     }
 
     /// Entries logged before they recorded their food: once, link each one to the catalog food of
@@ -693,6 +724,21 @@ final class DataStore {
         persistActive()
     }
 
+    /// Logs several catalog foods at once (`items`: food + doses), in one save.
+    func logFoodItems(_ items: [RecipeItem], mealType: MealType, date: Date) {
+        let newEntries: [FoodEntry] = items.compactMap { line in
+            guard line.quantity > 0, let item = foodItems.first(where: { $0.id == line.foodItemID }) else { return nil }
+            var entry = FoodEntry(name: item.name, nutrition: item.nutrition(quantity: line.quantity), mealType: mealType,
+                                  date: date, barcode: item.barcodes.first)
+            entry.foodItemID = item.id
+            entry.quantity = line.quantity
+            return entry
+        }
+        guard !newEntries.isEmpty else { return }
+        entries.append(contentsOf: newEntries)
+        persistActive()
+    }
+
     /// Logs one dose-scaled entry from a catalog food item.
     func logFoodItem(_ item: FoodItem, quantity: Double, mealType: MealType, date: Date) {
         var entry = FoodEntry(
@@ -720,11 +766,11 @@ final class DataStore {
         entries.filter { $0.groupID == groupID }.sorted { $0.date < $1.date }
     }
 
-    /// Logs a recipe group again with new amounts (or meal), in place: same group, day and time;
-    /// an entry whose food is still there keeps its id. An ingredient at 0 is removed.
-    func relogRecipe(_ recipe: Recipe, group groupID: UUID, items: [RecipeItem], mealType: MealType) {
+    /// Logs a recipe group again with new amounts, meal or time, in place (same group); an entry
+    /// whose food is still there keeps its id. An ingredient at 0 is removed.
+    func relogRecipe(_ recipe: Recipe, group groupID: UUID, items: [RecipeItem], mealType: MealType, date: Date) {
         let old = entries(inGroup: groupID)
-        guard let date = old.first?.date else { return }
+        guard !old.isEmpty else { return }
         var replaced = linkedEntries(for: items.filter { $0.quantity > 0 }, groupID: groupID, groupName: recipe.name,
                                      mealType: mealType, date: date, recipeID: recipe.id)
         for index in replaced.indices {
@@ -829,17 +875,49 @@ final class DataStore {
         if let existing = existingCatalogFood(named: payload.name) {
             return existing
         }
-        let newItem = payload.makeFoodItem()
+        var newItem = payload.makeFoodItem()
+        newItem.categoryID = foodCategory(named: payload.category)?.id
+        if let barcode = payload.resolvedBarcode, foodItem(forBarcode: barcode) == nil {
+            newItem.barcodes = [barcode]
+        }
         addFoodItem(newItem)
         return newItem
     }
 
-    /// One ingredient of an AI-imported recipe, backed by `catalogFood(for:)`. The AI counts the
-    /// quantity in doses of *its* `doseSize`; when an existing catalog food with a different dose
-    /// is reused (e.g. 1.5 × 100 g of rice vs. the catalog's 150 g dose), the quantity is
-    /// converted so the amount stays the same — whenever both share a base unit (g, ml or units).
+    /// The food category called `name` (ignoring case and accents), if there is one.
+    func foodCategory(named name: String?) -> FoodCategory? {
+        guard let name, !name.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+        let wanted = SearchMatch.normalized(name).trimmingCharacters(in: .whitespaces)
+        return foodCategories.first { SearchMatch.normalized($0.name).trimmingCharacters(in: .whitespaces) == wanted }
+    }
+
+    /// The ingredients of an AI-imported recipe (`recipeItem(for:)` each); an ingredient the AI
+    /// listed twice becomes one, with the amounts added up.
+    func recipeItems(for payloads: [RecipeItemImportPayload]) -> [RecipeItem] {
+        var merged: [RecipeItem] = []
+        for item in payloads.map(recipeItem(for:)) {
+            if let index = merged.firstIndex(where: { $0.foodItemID == item.foodItemID }) {
+                merged[index].quantity += item.quantity
+            } else {
+                merged.append(item)
+            }
+        }
+        return merged
+    }
+
+    /// One ingredient of an AI-imported recipe, backed by `catalogFood(for:)`. The AI gives the
+    /// amount for one portion in g / ml / units (`amount`; older answers: doses of *its*
+    /// `doseSize`). It's stored in doses of the catalog food actually used — converted when an
+    /// existing food with a different dose is reused (e.g. 150 g of rice vs. a 100 g dose), as long
+    /// as both share a base unit (g, ml or units).
     func recipeItem(for payload: RecipeItemImportPayload) -> RecipeItem {
-        let quantity = payload.quantity ?? 1
+        let importedDose = payload.food.makeFoodItem().baseDoseAmount
+        let quantity: Double
+        if let amount = payload.amount, amount > 0, importedDose > 0 {
+            quantity = amount / importedDose
+        } else {
+            quantity = payload.quantity ?? 1
+        }
         guard let existing = existingCatalogFood(named: payload.food.name) else {
             return RecipeItem(foodItemID: catalogFood(for: payload.food).id, quantity: quantity)
         }
@@ -848,7 +926,8 @@ final class DataStore {
             return RecipeItem(foodItemID: existing.id, quantity: quantity)
         }
         let converted = quantity * imported.baseDoseAmount / existing.baseDoseAmount
-        return RecipeItem(foodItemID: existing.id, quantity: (converted * 100).rounded() / 100)
+        // Enough decimals that adding up two lines of the same food keeps the grams exact.
+        return RecipeItem(foodItemID: existing.id, quantity: (converted * 10_000).rounded() / 10_000)
     }
 
     private func existingCatalogFood(named name: String) -> FoodItem? {
@@ -864,9 +943,15 @@ final class DataStore {
     }
 
     func deleteFoodItem(_ item: FoodItem) {
-        foodItems.removeAll { $0.id == item.id }
+        deleteFoodItems(withIDs: [item.id])
+    }
+
+    /// Deletes several foods at once (and takes them out of every recipe), in one save.
+    func deleteFoodItems(withIDs ids: Set<UUID>) {
+        guard !ids.isEmpty else { return }
+        foodItems.removeAll { ids.contains($0.id) }
         for index in recipes.indices {
-            recipes[index].items.removeAll { $0.foodItemID == item.id }
+            recipes[index].items.removeAll { ids.contains($0.foodItemID) }
         }
         persistActive()
     }
@@ -919,7 +1004,13 @@ final class DataStore {
     }
 
     func deleteRecipe(_ recipe: Recipe) {
-        recipes.removeAll { $0.id == recipe.id }
+        deleteRecipes(withIDs: [recipe.id])
+    }
+
+    /// Deletes several recipes at once, in one save.
+    func deleteRecipes(withIDs ids: Set<UUID>) {
+        guard !ids.isEmpty else { return }
+        recipes.removeAll { ids.contains($0.id) }
         persistActive()
     }
 
@@ -1276,6 +1367,7 @@ final class DataStore {
         bodyMeasurements = database.bodyMeasurements
         progressPhotos = database.progressPhotos
         linkUnlinkedDiaryEntries()
+        moveMealPlansToMealStages()
         persistActive(countingChange: false)
         refreshBackupTimestamp()
     }

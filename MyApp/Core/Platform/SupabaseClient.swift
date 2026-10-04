@@ -341,19 +341,21 @@ final class SupabaseClient {
         return decoder
     }()
 
-    private static let timestampFormatter: ISO8601DateFormatter = {
+    // Pure helpers, usable off the main actor (decoders, background parsing). The formatters are
+    // only configured once, then just read — safe to share although not marked Sendable.
+    nonisolated(unsafe) private static let timestampFormatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return formatter
     }()
 
-    private static let timestampFormatterNoFraction = ISO8601DateFormatter()
+    nonisolated(unsafe) private static let timestampFormatterNoFraction = ISO8601DateFormatter()
 
     /// A timestamp as Postgres `timestamptz` expects it.
-    static func timestamp(_ date: Date) -> String { timestampFormatter.string(from: date) }
+    nonisolated static func timestamp(_ date: Date) -> String { timestampFormatter.string(from: date) }
 
     /// Parses a Postgres `timestamptz` (with or without fractional seconds).
-    static func date(fromTimestamp string: String) -> Date? {
+    nonisolated static func date(fromTimestamp string: String) -> Date? {
         timestampFormatter.date(from: string) ?? timestampFormatterNoFraction.date(from: string)
     }
 }

@@ -88,7 +88,7 @@ struct RecipeEditorView: View {
                     Button {
                         showingAddComponent = true
                     } label: {
-                        Label("Adicionar Alimento", systemImage: "plus")
+                        Label("Adicionar Alimentos", systemImage: "plus")
                     }
                     .disabled(store.foodItems.isEmpty)
                 } header: {
@@ -145,7 +145,7 @@ struct RecipeEditorView: View {
             .sheet(isPresented: $showingJSONImport) {
                 JSONImportSheet(
                     title: "Importar Receita",
-                    prompt: AIJSONImport.recipePrompt,
+                    prompt: AIJSONImport.recipePrompt(categories: store.foodCategories.map(\.name)),
                     instructions: "Útil quando não sabes ao detalhe o valor nutricional de cada ingrediente. Um ingrediente com o mesmo nome de um alimento já existente no catálogo é reutilizado em vez de criado outra vez."
                 ) { json in
                     try handleJSONImport(json)
@@ -167,7 +167,14 @@ struct RecipeEditorView: View {
         if name.trimmingCharacters(in: .whitespaces).isEmpty, let payloadName = payload.name {
             name = payloadName.trimmingCharacters(in: .whitespaces)
         }
-        items.append(contentsOf: payload.items.map(store.recipeItem(for:)))
+        // A food already in the recipe gets the imported amount added instead of a second line.
+        for item in store.recipeItems(for: payload.items) {
+            if let index = items.firstIndex(where: { $0.foodItemID == item.foodItemID }) {
+                items[index].quantity += item.quantity
+            } else {
+                items.append(item)
+            }
+        }
     }
 
     private func save() {
@@ -189,7 +196,8 @@ struct RecipeEditorView: View {
     }
 }
 
-/// Lets the user pick one catalog food (not already in the recipe) and how many servings of it.
+/// Adds ingredients: search the catalog and pick one or several foods (not already in the
+/// recipe), then their amounts. A barcode can be scanned too, or a new food created.
 private struct RecipeComponentPickerView: View {
     @Environment(DataStore.self) private var store
     @Environment(\.dismiss) private var dismiss
@@ -197,9 +205,8 @@ private struct RecipeComponentPickerView: View {
     let existingFoodIDs: Set<UUID>
     let onAdd: (UUID, Double) -> Void
 
-    @State private var selectedFoodID: UUID?
-    /// The amount in the food's own unit (g, ml, units…); stored in the recipe as doses.
-    @State private var amountText = ""
+    @State private var selection: [UUID] = []
+    @State private var showingAmounts = false
     @State private var showingNewFoodItem = false
     /// Barcode to prefill the new food with (scanned but not in the catalog).
     @State private var newFoodBarcode: String?
@@ -209,51 +216,9 @@ private struct RecipeComponentPickerView: View {
     @State private var unknownBarcode: String?
     @State private var alreadyInRecipe: String?
 
-    private var availableFoods: [FoodItem] {
-        store.foodItems.filter { !existingFoodIDs.contains($0.id) }
-    }
-
-    private var selectedFood: FoodItem? {
-        selectedFoodID.flatMap { id in store.foodItems.first { $0.id == id } }
-    }
-
-    private var quantity: Double? {
-        guard let food = selectedFood, food.doseSize > 0,
-              let amount = Double(amountText.replacingOccurrences(of: ",", with: ".")), amount > 0 else { return nil }
-        return amount / food.doseSize
-    }
-
     var body: some View {
         NavigationStack {
-            Form {
-                Section {
-                    Picker("Alimento", selection: $selectedFoodID) {
-                        Text("Escolhe...").tag(UUID?.none)
-                        ForEach(availableFoods) { food in
-                            Text(food.name).tag(Optional(food.id))
-                        }
-                    }
-                    if let food = selectedFood {
-                        HStack {
-                            Text("Quantidade")
-                            Spacer()
-                            TextField(RecipeIngredientEditorView.number(food.doseSize), text: $amountText)
-                                .keyboardType(.decimalPad)
-                                .multilineTextAlignment(.trailing)
-                                .frame(width: 80)
-                            Text(food.unit.shortLabel)
-                                .foregroundStyle(.secondary)
-                        }
-                        if let quantity {
-                            Text("\(food.scaledCalories(quantity: quantity)) kcal")
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-                .onChange(of: selectedFoodID) {
-                    amountText = selectedFood.map { RecipeIngredientEditorView.number($0.doseSize) } ?? ""
-                }
-
+            FoodSelectionList(selection: $selection, excluded: existingFoodIDs) {
                 Section {
                     Button {
                         showingScanner = true
@@ -267,22 +232,24 @@ private struct RecipeComponentPickerView: View {
                         Label("Criar Novo Alimento", systemImage: "plus.circle")
                     }
                 } footer: {
-                    Text("Um código que já está no catálogo escolhe esse alimento; um código novo abre a criação manual com o código preenchido. O novo alimento fica guardado no catálogo e é adicionado à receita automaticamente.")
+                    Text("Escolhe vários alimentos de uma vez. Um código que já está no catálogo seleciona esse alimento; um código novo abre a criação manual com o código preenchido.")
                 }
             }
-            .navigationTitle("Adicionar Alimento")
+            .navigationTitle("Adicionar Alimentos")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancelar") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Adicionar") {
-                        if let selectedFoodID, let quantity {
-                            onAdd(selectedFoodID, quantity)
-                        }
-                        dismiss()
-                    }
-                    .disabled(selectedFoodID == nil || quantity == nil)
+                    Button(selection.isEmpty ? "Seguinte" : "Seguinte (\(selection.count))") { showingAmounts = true }
+                        .disabled(selection.isEmpty)
+                }
+            }
+            .navigationDestination(isPresented: $showingAmounts) {
+                FoodAmountsView(foodIDs: selection, confirmTitle: "Adicionar") { items, _, _ in
+                    for item in items { onAdd(item.foodItemID, item.quantity) }
+                    dismiss()
                 }
             }
             .sheet(isPresented: $showingNewFoodItem) {
@@ -318,8 +285,8 @@ private struct RecipeComponentPickerView: View {
         }
     }
 
-    /// A known code picks its food (amount prefilled with one dose); an unknown one warns and
-    /// then opens the manual editor with the code filled in.
+    /// A known code selects its food; an unknown one warns and then opens the manual editor with
+    /// the code filled in.
     private func handleScannedCode() {
         guard let code = scannedCode else { return }
         scannedCode = nil
@@ -329,8 +296,8 @@ private struct RecipeComponentPickerView: View {
         }
         if existingFoodIDs.contains(food.id) {
             alreadyInRecipe = food.name
-        } else {
-            selectedFoodID = food.id
+        } else if !selection.contains(food.id) {
+            selection.append(food.id)
         }
     }
 }
