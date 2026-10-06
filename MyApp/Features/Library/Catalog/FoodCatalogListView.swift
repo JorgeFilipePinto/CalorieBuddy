@@ -27,11 +27,12 @@ struct FoodCatalogListView: View {
     private var others: [FoodItem] { visibleItems.filter { !$0.isFavorite } }
     private var alphabeticalGroups: [(letter: String, items: [FoodItem])] { others.groupedAlphabetically }
 
-    /// One section per category (in the categories' order), then the uncategorised foods.
+    /// One section per category and subcategory ("Proteína · Carne"), in the categories' order,
+    /// then the uncategorised foods.
     private var categoryGroups: [(id: String, title: String, items: [FoodItem])] {
-        var groups: [(id: String, title: String, items: [FoodItem])] = store.foodCategories.compactMap { category in
+        var groups: [(id: String, title: String, items: [FoodItem])] = store.orderedFoodCategories.compactMap { category in
             let items = others.filter { $0.categoryID == category.id }
-            return items.isEmpty ? nil : (category.id.uuidString, category.name, items)
+            return items.isEmpty ? nil : (category.id.uuidString, store.categoryTitle(category), items)
         }
         let known = Set(store.foodCategories.map(\.id))
         let rest = others.filter { $0.categoryID.map { !known.contains($0) } ?? true }
@@ -70,8 +71,9 @@ struct FoodCatalogListView: View {
                         } else if groupedByCategory {
                             ForEach(categoryGroups, id: \.id) { group in
                                 Section("\(group.title) (\(group.items.count))") {
-                                    ForEach(group.items) { item in
-                                        row(for: item)
+                                    // Each food with its preparations (grelhado, cozido…) under it.
+                                    ForEach(group.items.withPreparationsUnderBase(), id: \.item.id) { entry in
+                                        row(for: entry.item, nested: entry.isNested)
                                     }
                                 }
                             }
@@ -198,7 +200,7 @@ struct FoodCatalogListView: View {
         }
     }
 
-    private func row(for item: FoodItem) -> some View {
+    private func row(for item: FoodItem, nested: Bool = false) -> some View {
         Button {
             if isSelecting {
                 toggleSelection(item.id)
@@ -210,10 +212,18 @@ struct FoodCatalogListView: View {
                 if isSelecting {
                     SelectionMark(isSelected: selectedIDs.contains(item.id))
                 }
-                PhotoThumbnail(photoID: item.photoID, placeholder: "carrot")
+                if nested {
+                    Image(systemName: item.preparation?.symbolName ?? "arrow.turn.down.right")
+                        .foregroundStyle(.secondary)
+                        .frame(width: 24)
+                        .padding(.leading, 12)
+                } else {
+                    PhotoThumbnail(photoID: item.photoID, placeholder: "carrot")
+                }
                 VStack(alignment: .leading) {
                     HStack(spacing: 4) {
                         Text(item.brand.map { "\(item.name) (\($0))" } ?? item.name)
+                            .font(nested ? .subheadline : .body)
                         if item.isFavorite {
                             Image(systemName: "star.fill").foregroundStyle(.yellow).font(.caption)
                         }

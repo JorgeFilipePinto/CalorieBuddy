@@ -39,6 +39,10 @@ final class DataStore {
     private(set) var nutritionPlans: [NutritionPlan] = []
     private(set) var bodyMeasurements: [BodyMeasurement] = []
     private(set) var progressPhotos: [ProgressPhoto] = []
+    private(set) var pantryLocations: [PantryLocation] = []
+    private(set) var pantryLots: [PantryLot] = []
+    private(set) var cookingYields: [CookingYield] = []
+    private(set) var mealPreps: [MealPrep] = []
     var settings: UserSettings = .default
 
     private(set) var backupTimestamp: Date?
@@ -867,11 +871,14 @@ final class DataStore {
         persistActive()
     }
 
-    /// The catalog food an AI-imported food stands for: an existing one with the same name
-    /// (case-insensitive), so the same ingredient showing up in several imports isn't duplicated,
+    /// The catalog food an AI-imported food stands for: an existing one with its barcode or the
+    /// same name (case-insensitive), so the same ingredient showing up in several imports isn't duplicated,
     /// or else a new one, added to the catalog.
     @discardableResult
     func catalogFood(for payload: FoodImportPayload) -> FoodItem {
+        if let barcode = payload.resolvedBarcode, let existing = foodItem(forBarcode: barcode) {
+            return existing
+        }
         if let existing = existingCatalogFood(named: payload.name) {
             return existing
         }
@@ -939,7 +946,34 @@ final class DataStore {
         guard let index = foodItems.firstIndex(where: { $0.id == item.id }) else { return }
         foodItems[index] = item
         refreshEntries(linkedTo: item)
+        refreshPreparations(of: item)
         persistActive()
+    }
+
+    /// A preparation of a raw food, added or changed: its label is (re)worked out from the raw food.
+    @discardableResult
+    func savePreparation(of base: FoodItem, method: FoodPreparation, change: Double, name: String,
+                         categoryID: UUID?, existing: FoodItem?) -> FoodItem {
+        var item = base.prepared(method, change: change, updating: existing)
+        item.name = name
+        item.categoryID = categoryID
+        if let index = foodItems.firstIndex(where: { $0.id == item.id }) {
+            foodItems[index] = item
+            refreshEntries(linkedTo: item)
+        } else {
+            foodItems.append(item)
+        }
+        persistActive()
+        return item
+    }
+
+    /// A raw food changed: its preparations' labels follow it (and what was logged from them).
+    private func refreshPreparations(of base: FoodItem) {
+        for index in foodItems.indices where foodItems[index].baseFoodID == base.id {
+            let current = foodItems[index]
+            foodItems[index] = base.prepared(current.preparation ?? .boiled, change: current.cookingWeightChange ?? 0, updating: current)
+            refreshEntries(linkedTo: foodItems[index])
+        }
     }
 
     func deleteFoodItem(_ item: FoodItem) {
@@ -952,6 +986,11 @@ final class DataStore {
         foodItems.removeAll { ids.contains($0.id) }
         for index in recipes.indices {
             recipes[index].items.removeAll { ids.contains($0.foodItemID) }
+        }
+        pantryLots.removeAll { ids.contains($0.foodItemID) }
+        // Preparations of a removed food keep their values, as foods of their own.
+        for index in foodItems.indices where foodItems[index].baseFoodID.map(ids.contains) == true {
+            foodItems[index].baseFoodID = nil
         }
         persistActive()
     }
@@ -974,11 +1013,28 @@ final class DataStore {
         persistActive()
     }
 
-    /// Removes a category; its foods stay in the catalog, uncategorised.
+    /// Moves a category under another one (a subcategory) or back to the top (`nil`).
+    func setParent(of category: FoodCategory, to parentID: UUID?) {
+        guard let index = foodCategories.firstIndex(where: { $0.id == category.id }), parentID != category.id else { return }
+        foodCategories[index].parentID = parentID
+        // Two levels only: its own subcategories move up with it.
+        if parentID != nil {
+            for child in foodCategories.indices where foodCategories[child].parentID == category.id {
+                foodCategories[child].parentID = parentID
+            }
+        }
+        persistActive()
+    }
+
+    /// Removes a category. Its foods go to its parent category (uncategorised for a top-level one)
+    /// and its subcategories become top-level categories.
     func deleteFoodCategory(_ category: FoodCategory) {
         foodCategories.removeAll { $0.id == category.id }
         for index in foodItems.indices where foodItems[index].categoryID == category.id {
-            foodItems[index].categoryID = nil
+            foodItems[index].categoryID = category.parentID
+        }
+        for index in foodCategories.indices where foodCategories[index].parentID == category.id {
+            foodCategories[index].parentID = nil
         }
         persistActive()
     }
@@ -1011,6 +1067,9 @@ final class DataStore {
     func deleteRecipes(withIDs ids: Set<UUID>) {
         guard !ids.isEmpty else { return }
         recipes.removeAll { ids.contains($0.id) }
+        for index in mealPreps.indices {
+            mealPreps[index].items.removeAll { ids.contains($0.recipeID) }
+        }
         persistActive()
     }
 
@@ -1173,6 +1232,167 @@ final class DataStore {
         persistActive()
     }
 
+    // MARK: - Food stock (pantry)
+
+    func addPantryLocation(_ location: PantryLocation) {
+        pantryLocations.append(location)
+        persistActive()
+    }
+
+    func renamePantryLocation(_ location: PantryLocation, to name: String) {
+        guard let index = pantryLocations.firstIndex(where: { $0.id == location.id }) else { return }
+        pantryLocations[index].name = name
+        persistActive()
+    }
+
+    /// Removes the location with everything stocked there; meal preps cooked from it fall back to
+    /// every location.
+    func deletePantryLocation(_ location: PantryLocation) {
+        pantryLocations.removeAll { $0.id == location.id }
+        pantryLots.removeAll { $0.locationID == location.id }
+        for index in mealPreps.indices where mealPreps[index].locationID == location.id {
+            mealPreps[index].locationID = nil
+        }
+        persistActive()
+    }
+
+    /// Stock coming in (e.g. after shopping), in one save.
+    func addPantryLots(_ lots: [PantryLot]) {
+        guard !lots.isEmpty else { return }
+        pantryLots.append(contentsOf: lots)
+        persistActive()
+    }
+
+    /// A lot changed by hand (amount, location, expiry); at 0 or less it's gone.
+    func updatePantryLot(_ lot: PantryLot) {
+        guard let index = pantryLots.firstIndex(where: { $0.id == lot.id }) else { return }
+        if lot.remaining <= 0 {
+            pantryLots.remove(at: index)
+        } else {
+            pantryLots[index] = lot
+        }
+        persistActive()
+    }
+
+    func deletePantryLots(withIDs ids: Set<UUID>) {
+        guard !ids.isEmpty else { return }
+        pantryLots.removeAll { ids.contains($0.id) }
+        persistActive()
+    }
+
+    /// Takes `amounts` (base units by food) out of the stock at `locationID` (`nil` = anywhere),
+    /// the lots that expire first going first; emptied lots disappear. Expired lots aren't used.
+    /// Returns what couldn't be taken (not enough in stock).
+    @discardableResult
+    func takeFromPantry(_ amounts: [UUID: Double], locationID: UUID?) -> [UUID: Double] {
+        let missing = consumePantry(amounts, locationID: locationID)
+        persistActive()
+        return missing
+    }
+
+    private func consumePantry(_ amounts: [UUID: Double], locationID: UUID?) -> [UUID: Double] {
+        var missing: [UUID: Double] = [:]
+        let today = Calendar.current.startOfDay(for: .now)
+        for (foodID, amount) in amounts where amount > 0 {
+            var left = amount
+            let order = pantryLots.indices
+                .filter { index in
+                    let lot = pantryLots[index]
+                    return lot.foodItemID == foodID && (locationID == nil || lot.locationID == locationID)
+                        && (lot.expiresOn.map { $0 >= today } ?? true)
+                }
+                .sorted { (pantryLots[$0].expiresOn ?? .distantFuture) < (pantryLots[$1].expiresOn ?? .distantFuture) }
+            for index in order where left > 0 {
+                let taken = min(pantryLots[index].remaining, left)
+                pantryLots[index].remaining -= taken
+                left -= taken
+            }
+            if left > 0.0001 { missing[foodID] = left }
+        }
+        pantryLots.removeAll { $0.remaining <= 0.0001 }
+        return missing
+    }
+
+    // MARK: - Cooking yields
+
+    /// The reference table starts with `CookingYield.defaults` (also after a wipe, or on an
+    /// account restored before it existed).
+    func seedCookingYieldsIfEmpty() {
+        if cookingYields.isEmpty {
+            cookingYields = CookingYield.defaults
+            UserDefaults.standard.set(true, forKey: Self.hasSeededCookingMethodsKey)
+            persistActive()
+            return
+        }
+        // Tables made before values per way of cooking existed get those, once.
+        guard !UserDefaults.standard.bool(forKey: Self.hasSeededCookingMethodsKey) else { return }
+        UserDefaults.standard.set(true, forKey: Self.hasSeededCookingMethodsKey)
+        guard !cookingYields.contains(where: { $0.method != nil }) else { return }
+        let existing = Set(cookingYields.map(Self.yieldKey))
+        cookingYields += CookingYield.defaults.filter { $0.method != nil && !existing.contains(Self.yieldKey($0)) }
+        persistActive()
+    }
+
+    private static let hasSeededCookingMethodsKey = "CalorieBuddy.hasSeededCookingMethods"
+
+    func saveCookingYield(_ yield: CookingYield) {
+        if let index = cookingYields.firstIndex(where: { $0.id == yield.id }) {
+            cookingYields[index] = yield
+        } else {
+            cookingYields.append(yield)
+        }
+        persistActive()
+    }
+
+    func deleteCookingYields(withIDs ids: Set<UUID>) {
+        cookingYields.removeAll { ids.contains($0.id) }
+        persistActive()
+    }
+
+    /// Puts back the reference values (keeps the ones the user added under other names).
+    func resetCookingYields() {
+        let defaultKeys = Set(CookingYield.defaults.map(Self.yieldKey))
+        cookingYields = CookingYield.defaults + cookingYields.filter { !defaultKeys.contains(Self.yieldKey($0)) }
+        persistActive()
+    }
+
+    nonisolated private static func yieldKey(_ yield: CookingYield) -> String {
+        SearchMatch.normalized(yield.name) + "|" + (yield.method?.rawValue ?? "")
+    }
+
+    // MARK: - Meal prep
+
+    func saveMealPrep(_ prep: MealPrep) {
+        if let index = mealPreps.firstIndex(where: { $0.id == prep.id }) {
+            mealPreps[index] = prep
+        } else {
+            mealPreps.append(prep)
+        }
+        persistActive()
+    }
+
+    func deleteMealPrep(_ prep: MealPrep) {
+        mealPreps.removeAll { $0.id == prep.id }
+        persistActive()
+    }
+
+    /// Marks it as cooked and takes the raw ingredients out of its stock (what's there of them).
+    /// Returns what was missing from the stock.
+    @discardableResult
+    func markMealPrepCooked(_ prep: MealPrep) -> [UUID: Double] {
+        var cooked = prep
+        cooked.cookedAt = .now
+        if let index = mealPreps.firstIndex(where: { $0.id == prep.id }) {
+            mealPreps[index] = cooked
+        } else {
+            mealPreps.append(cooked)
+        }
+        let needed = mealPrepPlan(for: prep).requirements.reduce(into: [UUID: Double]()) { $0[$1.food.id] = $1.rawAmount }
+        let missing = consumePantry(needed, locationID: prep.locationID)
+        persistActive()
+        return missing
+    }
+
     // MARK: - Load / persist active database
 
     private func loadActive() {
@@ -1192,6 +1412,10 @@ final class DataStore {
         nutritionPlans = database.nutritionPlans
         bodyMeasurements = database.bodyMeasurements
         progressPhotos = database.progressPhotos
+        pantryLocations = database.pantryLocations
+        pantryLots = database.pantryLots
+        cookingYields = database.cookingYields
+        mealPreps = database.mealPreps
     }
 
     /// Re-reads the active database file from disk and updates in-memory state to match it.
@@ -1221,7 +1445,11 @@ final class DataStore {
             nutritionPlans: nutritionPlans,
             bodyMeasurements: bodyMeasurements,
             progressPhotos: progressPhotos,
-            foodCategories: foodCategories
+            foodCategories: foodCategories,
+            pantryLocations: pantryLocations,
+            pantryLots: pantryLots,
+            cookingYields: cookingYields,
+            mealPreps: mealPreps
         )
     }
 
@@ -1323,6 +1551,10 @@ final class DataStore {
         mealPlans = database.mealPlans
         bodyMeasurements = database.bodyMeasurements
         progressPhotos = database.progressPhotos
+        pantryLocations = database.pantryLocations
+        pantryLots = database.pantryLots
+        cookingYields = database.cookingYields
+        mealPreps = database.mealPreps
         persistActive(countingChange: false)
     }
 
@@ -1366,6 +1598,10 @@ final class DataStore {
         nutritionPlans = database.nutritionPlans
         bodyMeasurements = database.bodyMeasurements
         progressPhotos = database.progressPhotos
+        pantryLocations = database.pantryLocations
+        pantryLots = database.pantryLots
+        cookingYields = database.cookingYields
+        mealPreps = database.mealPreps
         linkUnlinkedDiaryEntries()
         moveMealPlansToMealStages()
         persistActive(countingChange: false)
@@ -1409,6 +1645,10 @@ final class DataStore {
         nutritionPlans = restoredDatabase.nutritionPlans
         bodyMeasurements = restoredDatabase.bodyMeasurements
         progressPhotos = restoredDatabase.progressPhotos
+        pantryLocations = restoredDatabase.pantryLocations
+        pantryLots = restoredDatabase.pantryLots
+        cookingYields = restoredDatabase.cookingYields
+        mealPreps = restoredDatabase.mealPreps
         persistActive(countingChange: false)
         refreshBackupTimestamp()
     }
@@ -1420,6 +1660,7 @@ final class DataStore {
     var hasUserData: Bool {
         !entries.isEmpty || !foodItems.isEmpty || !recipes.isEmpty || !supplements.isEmpty
             || !supplementLogs.isEmpty || !mealPlans.isEmpty || !bodyMeasurements.isEmpty || !progressPhotos.isEmpty
+            || !pantryLots.isEmpty || !mealPreps.isEmpty
     }
 
     /// Wipes every piece of data this app stores locally — entries, catalog, recipes, meal plan,
@@ -1438,6 +1679,10 @@ final class DataStore {
         nutritionPlans = []
         bodyMeasurements = []
         progressPhotos = []
+        pantryLocations = []
+        pantryLots = []
+        cookingYields = []
+        mealPreps = []
         settings = .default
         try? fileManager.removeItem(at: backupURL)
         PhotoStore.deleteAll()

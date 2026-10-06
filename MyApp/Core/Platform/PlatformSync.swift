@@ -247,7 +247,7 @@ final class PlatformSyncManager {
                 let rows = collection.documents.compactMap { $0.value as? FoodEntry }.map { Self.foodEntryRow($0, foods: foods) }
                 for batch in rows.chunked(into: Self.batchSize) { try await client.upsert("food_entries", rows: batch, onConflict: "id") }
             case AppCollection.foodItems:
-                let categoryNames = Dictionary(database.foodCategories.map { ($0.id, $0.name) }) { first, _ in first }
+                let categoryNames = CategoryNames(database.foodCategories)
                 let rows = collection.documents.compactMap { $0.value as? FoodItem }.map { Self.foodItemRow($0, categoryNames: categoryNames) }
                 for batch in rows.chunked(into: Self.batchSize) { try await client.upsert("food_items", rows: batch, onConflict: "id") }
             case AppCollection.recipes:
@@ -260,6 +260,11 @@ final class PlatformSyncManager {
             case AppCollection.supplements:
                 let rows = collection.documents.compactMap { $0.value as? Supplement }.map { Self.supplementRow($0, in: database) }
                 for batch in rows.chunked(into: Self.batchSize) { try await client.upsert("supplements", rows: batch, onConflict: "id") }
+            case _ where Self.pantryTables[collection.name] != nil:
+                let rows = collection.documents.compactMap { Self.pantryRow($0.value, foods: database.foodItems) }
+                for batch in rows.chunked(into: Self.batchSize) {
+                    try await client.upsert(Self.pantryTables[collection.name]!, rows: batch, onConflict: "id")
+                }
             default:
                 break
             }
@@ -323,7 +328,11 @@ final class PlatformSyncManager {
                 nutritionPlans: plans,
                 bodyMeasurements: try decode(AppCollection.bodyMeasurements, as: BodyMeasurement.self),
                 progressPhotos: try decode(AppCollection.progressPhotos, as: ProgressPhoto.self),
-                foodCategories: try decode(AppCollection.foodCategories, as: FoodCategory.self)
+                foodCategories: try decode(AppCollection.foodCategories, as: FoodCategory.self),
+                pantryLocations: try decode(AppCollection.pantryLocations, as: PantryLocation.self),
+                pantryLots: try decode(AppCollection.pantryLots, as: PantryLot.self),
+                cookingYields: try decode(AppCollection.cookingYields, as: CookingYield.self),
+                mealPreps: try decode(AppCollection.mealPreps, as: MealPrep.self)
             )
 
             // The images, before switching databases, so the restored records show their photos
@@ -555,6 +564,10 @@ final class PlatformSyncManager {
         case AppCollection.bodyMeasurements: try merge(&database.bodyMeasurements, BodyMeasurement.self)
         case AppCollection.progressPhotos: try merge(&database.progressPhotos, ProgressPhoto.self)
         case AppCollection.mealPlan: try merge(&database.mealPlans, MealPlan.self)
+        case AppCollection.pantryLocations: try merge(&database.pantryLocations, PantryLocation.self)
+        case AppCollection.pantryLots: try merge(&database.pantryLots, PantryLot.self)
+        case AppCollection.cookingYields: try merge(&database.cookingYields, CookingYield.self)
+        case AppCollection.mealPreps: try merge(&database.mealPreps, MealPrep.self)
         case AppCollection.settings:
             // One document; it can't be deleted, only replaced.
             guard let data else { return }
@@ -591,7 +604,7 @@ final class PlatformSyncManager {
         var resendFoods = false
         /// Set when a food changed: recipes' rows carry amounts worked out from the foods' doses.
         var resendRecipes = false
-        let categoryNames = Dictionary(database.foodCategories.map { ($0.id, $0.name) }) { first, _ in first }
+        let categoryNames = CategoryNames(database.foodCategories)
         for collection in AppCollection.all(of: database) {
             let previous = state.documentHashes[collection.name] ?? [:]
             var current: [String: String] = [:]
@@ -648,6 +661,13 @@ final class PlatformSyncManager {
                     try await client.upsert("supplements", rows: batch, onConflict: "id")
                 }
                 try await softDelete("supplements", ids: deleted)
+            case _ where Self.pantryTables[collection.name] != nil:
+                let table = Self.pantryTables[collection.name]!
+                let rows = typed.compactMap { Self.pantryRow($0.value, foods: database.foodItems) }
+                for batch in rows.chunked(into: Self.batchSize) {
+                    try await client.upsert(table, rows: batch, onConflict: "id")
+                }
+                try await softDelete(table, ids: deleted)
             default:
                 break
             }
@@ -792,7 +812,7 @@ final class PlatformSyncManager {
 
     /// A catalog food as the dashboard's `food_items` row: nutrition per 100 g/ml (or per unit),
     /// whatever basis and dose the app stores it with.
-    private static func foodItemRow(_ item: FoodItem, categoryNames: [UUID: String]) -> [String: Any] {
+    private static func foodItemRow(_ item: FoodItem, categoryNames: CategoryNames) -> [String: Any] {
         let isCounted = item.unit.baseUnit == .unit
         let dose = item.baseDoseAmount > 0 ? item.baseDoseAmount : 1
         let factor: Double = switch item.nutritionBasis {
@@ -819,8 +839,13 @@ final class PlatformSyncManager {
             // The rest of the food, for its page on the dashboard.
             "dose_size": clamp(item.baseDoseAmount, max: 99_999_999),
             "barcodes": item.barcodes,
-            "category": item.categoryID.flatMap { categoryNames[$0] } ?? NSNull(),
+            // A subcategory's food: category = its parent's name, subcategory = its own.
+            "category": categoryNames.topName(of: item.categoryID) ?? NSNull(),
+            "subcategory": categoryNames.subName(of: item.categoryID) ?? NSNull(),
+            "base_food_id": item.baseFoodID?.uuidString ?? NSNull(),
+            "preparation": item.preparation?.rawValue ?? NSNull(),
             "label_photo_paths": item.labelPhotoIDs.map { photoPath("food", $0) },
+            "cooking_weight_change": item.cookingWeightChange.flatMap { $0 > -100 && $0 <= 1000 ? $0 : nil } ?? NSNull(),
             "source": "ios_app",
             "deleted_at": NSNull()
         ]
@@ -847,6 +872,68 @@ final class PlatformSyncManager {
             "source": "ios_app",
             "deleted_at": NSNull()
         ]
+    }
+
+    /// The athlete-only typed tables of the food stock and meal prep, by collection.
+    private static let pantryTables: [String: String] = [
+        AppCollection.pantryLocations: "pantry_locations",
+        AppCollection.pantryLots: "pantry_lots",
+        AppCollection.cookingYields: "cooking_yields",
+        AppCollection.mealPreps: "meal_preps"
+    ]
+
+    /// A record of the food stock / meal prep as its typed row (migration pantry_meal_prep).
+    private static func pantryRow(_ value: any Encodable, foods: [FoodItem]) -> [String: Any]? {
+        switch value {
+        case let location as PantryLocation:
+            return ["id": location.id.uuidString, "name": String(location.name.prefix(120)), "source": "ios_app", "deleted_at": NSNull()]
+        case let lot as PantryLot:
+            let unit: String = switch foods.first(where: { $0.id == lot.foodItemID })?.unit.baseUnit {
+            case .milliliter: "ml"
+            case .unit: "unit"
+            default: "g"
+            }
+            return [
+                "id": lot.id.uuidString,
+                "food_item_id": lot.foodItemID.uuidString,
+                "location_id": lot.locationID.uuidString,
+                "remaining": clamp(lot.remaining, max: 9_999_999_999),
+                "unit": unit,
+                "added_at": SupabaseClient.timestamp(lot.addedAt),
+                "expires_on": lot.expiresOn.map(dayString) ?? NSNull(),
+                "source": "ios_app",
+                "deleted_at": NSNull()
+            ]
+        case let yield as CookingYield:
+            return [
+                "id": yield.id.uuidString,
+                "name": String(yield.name.prefix(120)),
+                "weight_change": min(max(yield.weightChange, -99.99), 1000),
+                "method": yield.method?.rawValue ?? NSNull(),
+                "source": "ios_app",
+                "deleted_at": NSNull()
+            ]
+        case let prep as MealPrep:
+            let items: [[String: Any]] = prep.items.map { item in
+                [
+                    "recipe_id": item.recipeID.uuidString,
+                    "boxes": item.boxes,
+                    "cooked_weight_per_box": item.cookedWeightPerBox ?? NSNull()
+                ]
+            }
+            return [
+                "id": prep.id.uuidString,
+                "name": String(prep.name.prefix(200)),
+                "items": items,
+                "location_id": prep.locationID?.uuidString ?? NSNull(),
+                "planned_at": SupabaseClient.timestamp(prep.createdAt),
+                "cooked_at": prep.cookedAt.map(SupabaseClient.timestamp) ?? NSNull(),
+                "source": "ios_app",
+                "deleted_at": NSNull()
+            ]
+        default:
+            return nil
+        }
     }
 
     /// A supplement as the dashboard's `supplements` row — what someone with the supplements
@@ -1057,6 +1144,11 @@ private struct AppCollection {
     static let settings = "settings"
     static let bodyMeasurements = "bodyMeasurements"
     static let progressPhotos = "progressPhotos"
+    // The food stock and meal prep (also typed rows, athlete-only: `pantryTables`).
+    static let pantryLocations = "pantryLocations"
+    static let pantryLots = "pantryLots"
+    static let cookingYields = "cookingYields"
+    static let mealPreps = "mealPreps"
 
     let name: String
     let documents: [(id: String, value: any Encodable)]
@@ -1090,6 +1182,10 @@ private struct AppCollection {
             // One document per plan, by id. (A single plan used to be stored under id "current";
             // the first sync after the update soft-deletes that one.)
             AppCollection(mealPlan, database.mealPlans),
+            AppCollection(pantryLocations, database.pantryLocations),
+            AppCollection(pantryLots, database.pantryLots),
+            AppCollection(cookingYields, database.cookingYields),
+            AppCollection(mealPreps, database.mealPreps),
             AppCollection(name: settings, documents: [("current", database.settings)])
         ]
     }
@@ -1115,7 +1211,10 @@ private struct PlatformSyncState: Codable {
     /// record once. 1: food_items.photo_path and progress_photos. 2: the full nutrition label
     /// (sugars, saturated fat, fibre, salt, micronutrients — migration nutrition_details).
     /// 3: supplements (migration supplements_catalog) and food_entries.food_item_id/quantity.
-    static let currentTypedRowsVersion = 4
+    /// 4: recipes and the food details (food_details_recipes). 5: the food stock and meal prep,
+    /// food_items.cooking_weight_change (pantry_meal_prep).
+    /// 6: food subcategories and preparations (base_food_id, preparation), cooking_yields.method.
+    static let currentTypedRowsVersion = 6
 
     /// One file per server: a Debug build (local Supabase) and a Release build (the VPS) on the
     /// same iPhone must not share what they think was already sent.
@@ -1147,5 +1246,25 @@ extension Array {
     /// Consecutive slices of at most `size` elements.
     func chunked(into size: Int) -> [[Element]] {
         stride(from: 0, to: count, by: size).map { Array(self[$0..<Swift.min($0 + size, count)]) }
+    }
+}
+
+/// Food category names for the typed rows: a food in a subcategory carries its parent's name as
+/// `category` and its own as `subcategory`.
+private struct CategoryNames {
+    private let byID: [UUID: FoodCategory]
+
+    init(_ categories: [FoodCategory]) {
+        byID = Dictionary(categories.map { ($0.id, $0) }) { first, _ in first }
+    }
+
+    func topName(of id: UUID?) -> String? {
+        guard let id, let category = byID[id] else { return nil }
+        return category.parentID.flatMap { byID[$0] }?.name ?? category.name
+    }
+
+    func subName(of id: UUID?) -> String? {
+        guard let id, let category = byID[id], category.parentID.flatMap({ byID[$0] }) != nil else { return nil }
+        return category.name
     }
 }

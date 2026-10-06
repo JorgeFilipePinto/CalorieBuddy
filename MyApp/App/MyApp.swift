@@ -1,4 +1,5 @@
 import SwiftUI
+import UserNotifications
 
 /// Shown once per cold launch, like the platform's own video landing page — not persisted, so
 /// relaunching the app plays the whole sequence again instead of a one-time onboarding.
@@ -19,6 +20,10 @@ struct MyApp: App {
     @State private var healthKit = HealthKitManager()
     @State private var platformSync = PlatformSyncManager()
     @State private var entryPhase: AppEntryPhase = .intro
+
+    init() {
+        UNUserNotificationCenter.current().delegate = ForegroundNotificationPresenter.shared
+    }
 
     var body: some Scene {
         WindowGroup {
@@ -59,6 +64,11 @@ struct MyApp: App {
         }
         .onChange(of: store.localChangeCount) {
             Task { await platformSync.syncAfterLocalChange(store: store, healthKit: healthKit) }
+            PantryExpiryAlerts.reschedule(store: store)
+        }
+        // Every time the app opens: warn about stocked food that's expiring.
+        .onChange(of: scenePhase, initial: true) { _, phase in
+            if phase == .active { PantryExpiryAlerts.appDidOpen(store: store) }
         }
         .onChange(of: scenePhase) { _, phase in
             switch phase {

@@ -111,6 +111,9 @@ struct FoodImportPayload: Codable {
     var category: String?
     /// The EAN printed on the package, when the AI could read it from a photo.
     var barcode: String?
+    /// % weight change raw → cooked (rice +160, chicken −25), for meal prep; only for raw foods
+    /// that change. `nil` = the app's reference for its name.
+    var cookingWeightChange: Double?
 
     var resolvedUnit: MeasurementUnit { parseMeasurementUnit(unit) }
 
@@ -140,6 +143,10 @@ struct FoodImportPayload: Codable {
         item.sugars = sugars
         item.fiber = fiber
         item.salt = salt
+        // A raw food can't lose all its weight; foods counted in units don't change.
+        if let change = cookingWeightChange, change > -100, change != 0, item.unit.baseUnit != .unit {
+            item.cookingWeightChange = change
+        }
         // Names the fixed list knows (Vitamina C, Magnésio…) become `micronutrients`.
         var micros: [String: Double] = [:]
         item.minerals = FoodItem.adopt(item.minerals, into: &micros)
@@ -171,6 +178,7 @@ extension FoodImportPayload {
         // A barcode sometimes comes back as a bare number.
         barcode = (try? container.decodeIfPresent(String.self, forKey: .barcode))
             ?? (try? container.decodeIfPresent(Int64.self, forKey: .barcode)).flatMap { $0.map(String.init) }
+        cookingWeightChange = try? container.lenientDouble(forKey: .cookingWeightChange)
     }
 }
 
@@ -195,6 +203,41 @@ extension RecipeItemImportPayload {
 struct RecipeImportPayload: Codable {
     var name: String?
     var items: [RecipeItemImportPayload]
+}
+
+/// One product that came into the food stock (e.g. a line of a shopping receipt or a photographed
+/// package): the food, how much came in and, when known, its expiry date and where it's kept.
+struct StockImportPayload: Codable {
+    var food: FoodImportPayload
+    /// Total amount that came in, in the food's unit (g, ml or units) — every pack added up.
+    var amount: Double?
+    /// "YYYY-MM-DD", read from the package; nil when not visible.
+    var expiresOn: String?
+    /// One of the user's stock locations, by name.
+    var location: String?
+
+    /// The expiry date as a day (accepts "2026-10-12" and "12/10/2026").
+    var resolvedExpiry: Date? {
+        guard let text = expiresOn?.trimmingCharacters(in: .whitespaces), !text.isEmpty else { return nil }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        for format in ["yyyy-MM-dd", "dd/MM/yyyy", "dd-MM-yyyy", "dd.MM.yyyy"] {
+            formatter.dateFormat = format
+            if let date = formatter.date(from: text) { return Calendar.current.startOfDay(for: date) }
+        }
+        return nil
+    }
+}
+
+extension StockImportPayload {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        food = try container.decode(FoodImportPayload.self, forKey: .food)
+        amount = try container.lenientDouble(forKey: .amount)
+        expiresOn = try? container.decodeIfPresent(String.self, forKey: .expiresOn)
+        location = try? container.decodeIfPresent(String.self, forKey: .location)
+    }
 }
 
 /// The `groupName`/`mealType` that used to live inside this payload are now entered directly in
@@ -370,6 +413,22 @@ enum AIJSONImport {
         throw AIImportError.invalidJSON
     }
 
+    /// Stock lines: an array, a single object, or a wrapper like `{ "items": [...] }`.
+    static func decodeStock(from json: String) throws -> [StockImportPayload] {
+        struct Wrapper: Decodable { let items: [StockImportPayload] }
+        let data = try data(from: json)
+        if let array = try? decoder.decode([StockImportPayload].self, from: data), !array.isEmpty {
+            return array
+        }
+        if let wrapper = try? decoder.decode(Wrapper.self, from: data), !wrapper.items.isEmpty {
+            return wrapper.items
+        }
+        if let single = try? decoder.decode(StockImportPayload.self, from: data) {
+            return [single]
+        }
+        throw AIImportError.invalidJSON
+    }
+
     static func decodeSupplements(from json: String) throws -> [SupplementImportPayload] {
         let data = try data(from: json)
         if let array = try? decoder.decode([SupplementImportPayload].self, from: data), !array.isEmpty {
@@ -453,7 +512,8 @@ extension AIJSONImport {
         - protein, carbs, fat: proteína, hidratos de carbono e lípidos, em gramas.
         - saturatedFat, sugars, fiber, salt (opcionais): lípidos saturados, açúcares, fibra e sal, em gramas, como no rótulo.
         - minerals, vitamins (opcionais): listas de { name, amount, unit }, com unit "g", "mg" ou "µg" (ex.: Potássio, Magnésio, Vitamina C, Tiamina (B1), Cafeína). Aminoácidos e substâncias de desporto também vão em "minerals" (ex.: Leucina, Isoleucina, Valina, Glutamina, Creatina, Beta-alanina, Citrulina, Taurina, L-carnitina, HMB, EPA, DHA).
-        - barcode (opcional): o código de barras (EAN, só dígitos) se estiver visível na foto da embalagem. Nunca o inventes.\(categoryField(categories))
+        - barcode (opcional): o código de barras (EAN, só dígitos) se estiver visível na foto da embalagem. Nunca o inventes.
+        - \(cookingField)\(categoryField(categories))
         Se eu descrever vários alimentos, devolve um array com um objeto por alimento.
         """,
         template: """
@@ -478,10 +538,58 @@ extension AIJSONImport {
             { "name": "<vitamina>", "amount": <quantidade>, "unit": "<g | mg | µg>" }
           ],
           "barcode": "<código de barras, opcional>",
+          "cookingWeightChange": <variação ao cozinhar em %, opcional>,
           "category": "<categoria, opcional>"
         }
         """
     ) }
+
+    /// The field asking how much a raw food's weight changes when cooked (for meal prep).
+    private static let cookingField = "cookingWeightChange (opcional): só para alimentos crus que mudam de peso ao cozinhar, a variação do peso de cru para cozinhado em % (ex.: arroz cru 160, massa crua 125, peito de frango cru -25, brócolos -10). Omite para alimentos já cozinhados ou prontos a comer e para os contados à unidade."
+
+    /// What came into the stock: foods (as in the food prompt) with the amount bought, the expiry
+    /// date read from the package and, when the user has stock locations, where it's kept.
+    static func stockPrompt(categories: [String] = [], locations: [String] = []) -> AIImportPrompt {
+        let locationField = locations.isEmpty ? "" : "\n  - location (opcional): onde guardar, exatamente um destes locais: " + locations.map { "\"\($0)\"" }.joined(separator: ", ") + ". Escolhe pelo tipo de produto (ex.: frescos no frigorífico, congelados no congelador); omite se não for claro."
+        return AIImportPrompt(
+            descriptionPlaceholder: "Descrição (ex.: compras do Continente, ver talão)",
+            task: "Preciso de registar a entrada de alimentos no stock de casa, numa app de nutrição. Os produtos são os que eu descrever no fim (ou os da foto do talão de compras ou das embalagens que eu enviar).",
+            fields: """
+            Campos (sempre um array, um objeto por produto; o mesmo produto comprado várias vezes aparece uma só vez com as quantidades somadas):
+            - food: o alimento, com os campos de um alimento — name (nome genérico em português, sem pesos nem preços; ex.: "Peito de Frango (cru)", "Arroz Agulha (cru)"), brand (opcional, só se for de marca), unit ("gram", "milliliter" ou "unit"), doseSize (uma dose habitual, na unidade), nutritionBasis ("per100" para valores por 100 g/ml, "perDose" por dose; "perDose" quando unit for "unit"), calories (kcal, inteiro), protein, carbs, fat e, se souberes, saturatedFat, sugars, fiber e salt (gramas); barcode (opcional, só se estiver visível; nunca o inventes); \(cookingField)\(categoryField(categories).replacingOccurrences(of: "\n- ", with: " Opcional também: "))
+            - amount: quantidade total que entrou, na unidade do alimento (ex.: 1000 para um pacote de 1 kg, 2000 para dois pacotes de 1 kg, 12 para uma dúzia de ovos). Converte kg e L para gramas e mililitros.
+            - expiresOn (opcional): data de validade impressa na embalagem, no formato "AAAA-MM-DD". Só se estiver visível; nunca a inventes.\(locationField)
+            Ignora no talão o que não é comida (sacos, detergentes…), os descontos e os totais.
+            """,
+            template: """
+            [
+              {
+                "food": {
+                  "name": "<nome do alimento>",
+                  "brand": "<marca, opcional>",
+                  "unit": "<gram | milliliter | unit>",
+                  "doseSize": <tamanho de uma dose, na unidade>,
+                  "nutritionBasis": "<per100 | perDose>",
+                  "calories": <kcal, inteiro>,
+                  "protein": <gramas>,
+                  "carbs": <gramas>,
+                  "fat": <gramas>,
+                  "saturatedFat": <gramas>,
+                  "sugars": <gramas>,
+                  "fiber": <gramas>,
+                  "salt": <gramas>,
+                  "barcode": "<código de barras, opcional>",
+                  "cookingWeightChange": <variação ao cozinhar em %, opcional>,
+                  "category": "<categoria, opcional>"
+                },
+                "amount": <quantidade total que entrou, na unidade do alimento>,
+                "expiresOn": "<AAAA-MM-DD, opcional>",
+                "location": "<local, opcional>"
+              }
+            ]
+            """
+        )
+    }
 
     static func recipePrompt(categories: [String] = []) -> AIImportPrompt { AIImportPrompt(
         descriptionPlaceholder: "Descrição (ex.: arroz de pato para 4 pessoas)",
@@ -490,7 +598,7 @@ extension AIJSONImport {
         Campos:
         - name (opcional): nome da receita.
         - items: um objeto por ingrediente (cada ingrediente uma só vez), com:
-          - food: o ingrediente, com os mesmos campos de um alimento — name, unit ("gram", "milliliter" ou "unit"), doseSize (uma dose habitual, na unidade), nutritionBasis ("per100" para valores por 100 g/ml, "perDose" por dose; "perDose" quando unit for "unit"), calories (kcal, inteiro), protein, carbs, fat e, se souberes, saturatedFat, sugars, fiber e salt (gramas).\(categoryField(categories).replacingOccurrences(of: "\n- ", with: " Opcional também: "))
+          - food: o ingrediente, com os mesmos campos de um alimento — name, unit ("gram", "milliliter" ou "unit"), doseSize (uma dose habitual, na unidade), nutritionBasis ("per100" para valores por 100 g/ml, "perDose" por dose; "perDose" quando unit for "unit"), calories (kcal, inteiro), protein, carbs, fat e, se souberes, saturatedFat, sugars, fiber e salt (gramas); \(cookingField)\(categoryField(categories).replacingOccurrences(of: "\n- ", with: " Opcional também: "))
           - amount: quanto desse ingrediente leva UMA dose individual (uma pessoa), na unidade do ingrediente — ex.: 150 para 150 g de arroz cozido, 2 para dois ovos, 5 para uma colher de chá de azeite.
         Se a receita for para várias pessoas, divide as quantidades pelo número de pessoas: as quantidades são só o ponto de partida, a app pergunta quanto foi comido ao registar.
         Usa os ingredientes no estado em que são pesados (ex.: arroz cozido ou cru) e indica-o no nome. Inclui gorduras de confeção (azeite, manteiga) e molhos, que são fáceis de esquecer.
@@ -512,7 +620,8 @@ extension AIJSONImport {
                 "saturatedFat": <gramas>,
                 "sugars": <gramas>,
                 "fiber": <gramas>,
-                "salt": <gramas>
+                "salt": <gramas>,
+                "cookingWeightChange": <variação ao cozinhar em %, opcional>
               },
               "amount": <quantidade numa dose individual, na unidade do ingrediente>
             }

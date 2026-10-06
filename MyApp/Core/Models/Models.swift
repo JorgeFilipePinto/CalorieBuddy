@@ -339,6 +339,47 @@ extension Array where Element: Favoritable {
 struct FoodCategory: Identifiable, Codable, Hashable {
     var id: UUID = UUID()
     var name: String
+    /// Set on a subcategory (e.g. "Carne" under "Proteína"): its top-level category. Two levels
+    /// only — a subcategory never has subcategories of its own.
+    var parentID: UUID?
+}
+
+/// How a food was prepared. A catalog food can have preparations (`FoodItem.baseFoodID`): each one
+/// its own food, with the label worked out from the raw one by its weight change — cooking adds or
+/// loses mostly water, so the nutrients of 100 g raw end up in 100 × (1 + change) g cooked.
+enum FoodPreparation: String, Codable, CaseIterable, Identifiable {
+    case raw, boiled, grilled, roasted, stewed, steamed, fried
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .raw: "Cru"
+        case .boiled: "Cozido"
+        case .grilled: "Grelhado"
+        case .roasted: "Assado"
+        case .stewed: "Estufado"
+        case .steamed: "A vapor"
+        case .fried: "Frito"
+        }
+    }
+
+    /// The word added to a preparation's name ("Peito de Frango (grelhado)").
+    var nameSuffix: String { displayName.lowercased() }
+
+    var symbolName: String {
+        switch self {
+        case .raw: "leaf"
+        case .boiled: "drop"
+        case .grilled: "flame"
+        case .roasted: "oven"
+        case .stewed: "frying.pan"
+        case .steamed: "cloud"
+        case .fried: "flame.fill"
+        }
+    }
+
+    static var cooked: [FoodPreparation] { allCases.filter { $0 != .raw } }
 }
 
 struct FoodItem: Identifiable, Codable, Hashable, Doseable, Favoritable {
@@ -380,6 +421,15 @@ struct FoodItem: Identifiable, Codable, Hashable, Doseable, Favoritable {
     var labelPhotoIDs: [UUID] = []
     /// Its `FoodCategory` (`nil` = uncategorised).
     var categoryID: UUID?
+    /// How much its weight changes when cooked, in % of the raw weight (rice +160, chicken −25).
+    /// `nil` = the reference for its name in the meal-prep settings (`CookingYield`). On a
+    /// preparation (`baseFoodID` set): the change from its raw food, which its label comes from.
+    var cookingWeightChange: Double?
+    /// Set on a preparation of another food (Frango → grelhado): the raw food it's made from. Its
+    /// label is worked out from that food and follows it when it changes.
+    var baseFoodID: UUID?
+    /// How it's prepared (raw, grilled, boiled…); `nil` = not stated.
+    var preparation: FoodPreparation?
 
     init(
         id: UUID = UUID(),
@@ -424,7 +474,7 @@ struct FoodItem: Identifiable, Codable, Hashable, Doseable, Favoritable {
     private enum CodingKeys: String, CodingKey {
         case id, name, brand, unit, doseSize, nutritionBasis, calories, protein, carbs, fat,
              minerals, vitamins, barcodes, prices, isFavorite, createdAt, photoID, categoryID, labelPhotoIDs,
-             saturatedFat, sugars, fiber, salt, micronutrients
+             saturatedFat, sugars, fiber, salt, micronutrients, cookingWeightChange, baseFoodID, preparation
     }
 
     /// Only for reading the old singular `barcode` field from databases saved before this was
@@ -472,6 +522,10 @@ struct FoodItem: Identifiable, Codable, Hashable, Doseable, Favoritable {
         photoID = try container.decodeIfPresent(UUID.self, forKey: .photoID)
         categoryID = try container.decodeIfPresent(UUID.self, forKey: .categoryID)
         labelPhotoIDs = try container.decodeIfPresent([UUID].self, forKey: .labelPhotoIDs) ?? []
+        cookingWeightChange = try container.decodeIfPresent(Double.self, forKey: .cookingWeightChange)
+        baseFoodID = try container.decodeIfPresent(UUID.self, forKey: .baseFoodID)
+        // A preparation this version doesn't know is read as "not stated".
+        preparation = (try? container.decodeIfPresent(FoodPreparation.self, forKey: .preparation)) ?? nil
     }
 
     /// Moves the free-text `values` the fixed list knows into `micros` (in their own unit) and
@@ -936,6 +990,8 @@ struct UserSettings: Codable, Equatable {
     var carbsGoal: Double?
     var fatGoal: Double?
     var dailyWaterGoalML: Int?
+    /// How many days before a stocked food expires the app starts warning (`nil` = 3).
+    var expiryWarningDays: Int?
 
     static let `default` = UserSettings(
         dailyCalorieGoal: 2000,
@@ -1314,6 +1370,10 @@ struct AppDatabase: Codable {
     var nutritionPlans: [NutritionPlan]
     var bodyMeasurements: [BodyMeasurement]
     var progressPhotos: [ProgressPhoto]
+    var pantryLocations: [PantryLocation]
+    var pantryLots: [PantryLot]
+    var cookingYields: [CookingYield]
+    var mealPreps: [MealPrep]
 
     init(
         version: Int,
@@ -1331,7 +1391,11 @@ struct AppDatabase: Codable {
         nutritionPlans: [NutritionPlan] = [],
         bodyMeasurements: [BodyMeasurement] = [],
         progressPhotos: [ProgressPhoto] = [],
-        foodCategories: [FoodCategory] = []
+        foodCategories: [FoodCategory] = [],
+        pantryLocations: [PantryLocation] = [],
+        pantryLots: [PantryLot] = [],
+        cookingYields: [CookingYield] = [],
+        mealPreps: [MealPrep] = []
     ) {
         self.version = version
         self.exportedAt = exportedAt
@@ -1349,12 +1413,16 @@ struct AppDatabase: Codable {
         self.nutritionPlans = nutritionPlans
         self.bodyMeasurements = bodyMeasurements
         self.progressPhotos = progressPhotos
+        self.pantryLocations = pantryLocations
+        self.pantryLots = pantryLots
+        self.cookingYields = cookingYields
+        self.mealPreps = mealPreps
     }
 
     private enum CodingKeys: String, CodingKey {
         case version, exportedAt, settings, entries, foodItems, recipes, stores,
              supplementCategories, supplements, supplementLogs, stockLocations, mealPlans, nutritionPlans,
-             bodyMeasurements, progressPhotos, foodCategories
+             bodyMeasurements, progressPhotos, foodCategories, pantryLocations, pantryLots, cookingYields, mealPreps
     }
 
     /// Databases written before several meal plans existed had at most one, under `mealPlan`.
@@ -1385,5 +1453,9 @@ struct AppDatabase: Codable {
         nutritionPlans = try container.decodeIfPresent([NutritionPlan].self, forKey: .nutritionPlans) ?? []
         bodyMeasurements = try container.decodeIfPresent([BodyMeasurement].self, forKey: .bodyMeasurements) ?? []
         progressPhotos = try container.decodeIfPresent([ProgressPhoto].self, forKey: .progressPhotos) ?? []
+        pantryLocations = try container.decodeIfPresent([PantryLocation].self, forKey: .pantryLocations) ?? []
+        pantryLots = try container.decodeIfPresent([PantryLot].self, forKey: .pantryLots) ?? []
+        cookingYields = try container.decodeIfPresent([CookingYield].self, forKey: .cookingYields) ?? []
+        mealPreps = try container.decodeIfPresent([MealPrep].self, forKey: .mealPreps) ?? []
     }
 }

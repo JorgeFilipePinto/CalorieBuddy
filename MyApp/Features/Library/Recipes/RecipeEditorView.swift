@@ -5,6 +5,8 @@ struct RecipeEditorView: View {
     @Environment(\.dismiss) private var dismiss
 
     let recipeToEdit: Recipe?
+    /// Called right after saving (e.g. a meal prep adds the new recipe).
+    var onSave: ((Recipe) -> Void)?
 
     @State private var name = ""
     @State private var photoID: UUID?
@@ -14,8 +16,9 @@ struct RecipeEditorView: View {
     @State private var showingJSONImport = false
     @State private var editingItem: RecipeItem?
 
-    init(recipeToEdit: Recipe? = nil) {
+    init(recipeToEdit: Recipe? = nil, onSave: ((Recipe) -> Void)? = nil) {
         self.recipeToEdit = recipeToEdit
+        self.onSave = onSave
     }
 
     private var isValid: Bool {
@@ -192,6 +195,7 @@ struct RecipeEditorView: View {
         } else {
             store.updateRecipe(recipe)
         }
+        onSave?(recipe)
         dismiss()
     }
 }
