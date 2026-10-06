@@ -246,24 +246,35 @@ struct SelectionMark: View {
     }
 }
 
-/// The bar under a list in multi-select mode: "Eliminar N …", disabled with nothing selected.
-struct SelectionDeleteBar: View {
+/// The bar under a list in multi-select mode: "Eliminar N …", disabled with nothing selected, with
+/// an optional action before it (e.g. a "Mover" menu).
+struct SelectionDeleteBar<Leading: View>: View {
     let count: Int
     /// Singular and plural ("alimento", "alimentos").
     let noun: (String, String)
+    @ViewBuilder var leading: Leading
     let onDelete: () -> Void
 
     var body: some View {
-        Button(role: .destructive, action: onDelete) {
-            Label(count == 0 ? "Escolhe o que eliminar" : "Eliminar \(count) \(count == 1 ? noun.0 : noun.1)",
-                  systemImage: "trash")
-                .frame(maxWidth: .infinity)
+        HStack {
+            leading
+            Button(role: .destructive, action: onDelete) {
+                Label(count == 0 ? "Escolhe o que eliminar" : "Eliminar \(count) \(count == 1 ? noun.0 : noun.1)",
+                      systemImage: "trash")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.red)
         }
-        .buttonStyle(.borderedProminent)
-        .tint(.red)
         .controlSize(.large)
         .disabled(count == 0)
         .padding(.horizontal)
         .padding(.bottom, 8)
+    }
+}
+
+extension SelectionDeleteBar where Leading == EmptyView {
+    init(count: Int, noun: (String, String), onDelete: @escaping () -> Void) {
+        self.init(count: count, noun: noun, leading: { EmptyView() }, onDelete: onDelete)
     }
 }

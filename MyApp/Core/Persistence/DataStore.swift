@@ -995,6 +995,18 @@ final class DataStore {
         persistActive()
     }
 
+    /// Moves several foods to a category (`nil` = none), each raw food with its preparations, in one save.
+    func moveFoodItems(withIDs ids: Set<UUID>, toCategory categoryID: UUID?) {
+        guard !ids.isEmpty else { return }
+        for index in foodItems.indices {
+            let item = foodItems[index]
+            if ids.contains(item.id) || item.baseFoodID.map(ids.contains) == true {
+                foodItems[index].categoryID = categoryID
+            }
+        }
+        persistActive()
+    }
+
     // MARK: - Food categories
 
     func foodCategory(withID id: UUID?) -> FoodCategory? {

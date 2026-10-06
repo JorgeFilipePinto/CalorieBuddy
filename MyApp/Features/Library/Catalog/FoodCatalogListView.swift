@@ -103,7 +103,11 @@ struct FoodCatalogListView: View {
         }
         .safeAreaInset(edge: .bottom) {
             if isSelecting {
-                SelectionDeleteBar(count: selectedIDs.count, noun: ("alimento", "alimentos")) { confirmingDelete = true }
+                SelectionDeleteBar(count: selectedIDs.count, noun: ("alimento", "alimentos")) {
+                    moveMenu
+                } onDelete: {
+                    confirmingDelete = true
+                }
             }
         }
         .confirmationDialog(
@@ -271,6 +275,28 @@ struct FoodCatalogListView: View {
                 }
             }
         }
+    }
+
+    /// "Mover" the selected foods to a category or subcategory (their preparations go with them).
+    private var moveMenu: some View {
+        Menu {
+            ForEach(store.orderedFoodCategories) { category in
+                Button(store.categoryTitle(category)) { move(to: category.id) }
+            }
+            Divider()
+            Button("Sem categoria") { move(to: nil) }
+        } label: {
+            Label("Mover", systemImage: "folder")
+                .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.bordered)
+    }
+
+    private func move(to categoryID: UUID?) {
+        store.moveFoodItems(withIDs: selectedIDs, toCategory: categoryID)
+        Haptics.success()
+        selectedIDs = []
+        isSelecting = false
     }
 
     private func toggleSelection(_ id: UUID) {
