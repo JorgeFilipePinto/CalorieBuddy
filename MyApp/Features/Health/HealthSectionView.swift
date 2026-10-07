@@ -226,7 +226,9 @@ private struct LogWeightView: View {
                     Text("Peso (kg)")
                     Spacer()
                     TextField("70.0", text: $weightText)
+                        #if os(iOS)
                         .keyboardType(.decimalPad)
+                        #endif
                         .multilineTextAlignment(.trailing)
                         .frame(width: 100)
                 }

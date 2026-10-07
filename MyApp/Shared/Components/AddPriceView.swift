@@ -64,7 +64,9 @@ struct AddPriceView: View {
                         Text("Tamanho")
                         Spacer()
                         TextField("1", value: $packageSize, format: .number)
+                            #if os(iOS)
                             .keyboardType(.decimalPad)
+                            #endif
                             .multilineTextAlignment(.trailing)
                             .frame(width: 80)
                         Picker("Unidade", selection: $packageUnit) {
@@ -78,11 +80,15 @@ struct AddPriceView: View {
 
                 Section("Preço") {
                     TextField("0,00", value: $price, format: .currency(code: currencyCode))
+                        #if os(iOS)
                         .keyboardType(.decimalPad)
+                        #endif
                     Toggle("Este preço é uma promoção", isOn: $isPromotion)
                     if isPromotion {
                         TextField("Preço normal (sem promoção)", value: $regularPrice, format: .currency(code: currencyCode))
+                            #if os(iOS)
                             .keyboardType(.decimalPad)
+                            #endif
                     }
                 }
             }

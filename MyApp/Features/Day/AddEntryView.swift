@@ -36,7 +36,9 @@ struct AddEntryView: View {
                 Section("Alimento") {
                     TextField("Nome", text: $name)
                     TextField("Calorias (kcal)", text: $caloriesText)
+                        #if os(iOS)
                         .keyboardType(.numberPad)
+                        #endif
                     Picker("Refeição", selection: $mealType) {
                         ForEach(MealType.allCases) { meal in
                             Label(meal.displayName, systemImage: meal.symbolName).tag(meal)
@@ -47,11 +49,17 @@ struct AddEntryView: View {
 
                 Section("Macros (opcional)") {
                     TextField("Proteína (g)", text: $proteinText)
+                        #if os(iOS)
                         .keyboardType(.decimalPad)
+                        #endif
                     TextField("Hidratos de Carbono (g)", text: $carbsText)
+                        #if os(iOS)
                         .keyboardType(.decimalPad)
+                        #endif
                     TextField("Gordura (g)", text: $fatText)
+                        #if os(iOS)
                         .keyboardType(.decimalPad)
+                        #endif
                 }
 
                 Section("Código de Barras") {

@@ -129,7 +129,7 @@ struct FoodCatalogListView: View {
         .searchable(text: $searchText, prompt: "Procurar por nome")
         .toolbar {
             if isSelecting {
-                ToolbarItem(placement: .topBarLeading) {
+                ToolbarItem(placement: .barLeading) {
                     let allVisible = Set(visibleItems.map(\.id))
                     Button(allVisible.isSubset(of: selectedIDs) ? "Nenhum" : "Todos") {
                         selectedIDs = allVisible.isSubset(of: selectedIDs) ? [] : allVisible
@@ -142,7 +142,7 @@ struct FoodCatalogListView: View {
                     }
                 }
             } else {
-            ToolbarItem(placement: .topBarLeading) {
+            ToolbarItem(placement: .barLeading) {
                 Picker("Ordenar por", selection: $sortOrder) {
                     ForEach(ItemSortOrder.allCases) { order in
                         Text(order.label).tag(order)
@@ -150,7 +150,7 @@ struct FoodCatalogListView: View {
                 }
                 .pickerStyle(.menu)
             }
-            ToolbarItem(placement: .topBarTrailing) {
+            ToolbarItem(placement: .barTrailing) {
                 Button("Selecionar") { isSelecting = true }
                     .disabled(store.foodItems.isEmpty)
             }

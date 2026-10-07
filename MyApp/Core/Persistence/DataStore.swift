@@ -43,6 +43,8 @@ final class DataStore {
     private(set) var pantryLots: [PantryLot] = []
     private(set) var cookingYields: [CookingYield] = []
     private(set) var mealPreps: [MealPrep] = []
+    private(set) var mealBoardPlacements: [MealBoardPlacement] = []
+    private(set) var mealBoardDays: [MealBoardDay] = []
     var settings: UserSettings = .default
 
     private(set) var backupTimestamp: Date?
@@ -1082,12 +1084,70 @@ final class DataStore {
         for index in mealPreps.indices {
             mealPreps[index].items.removeAll { ids.contains($0.recipeID) }
         }
+        mealBoardPlacements.removeAll { ids.contains($0.recipeID) }
         persistActive()
     }
 
     func toggleFavorite(_ recipe: Recipe) {
         guard let index = recipes.firstIndex(where: { $0.id == recipe.id }) else { return }
         recipes[index].isFavorite.toggle()
+        persistActive()
+    }
+
+    // MARK: - Week board
+
+    func placeRecipe(_ recipe: Recipe, day: String, meal: MealType) {
+        mealBoardPlacements.append(MealBoardPlacement(day: day, meal: meal, recipeID: recipe.id))
+        persistActive()
+    }
+
+    /// Saves a placement's day, meal or amounts (or adds it, for a duplicate).
+    func savePlacement(_ placement: MealBoardPlacement) {
+        if let index = mealBoardPlacements.firstIndex(where: { $0.id == placement.id }) {
+            mealBoardPlacements[index] = placement
+        } else {
+            mealBoardPlacements.append(placement)
+        }
+        persistActive()
+    }
+
+    func movePlacement(id: UUID, to day: String, meal: MealType, copying: Bool = false) {
+        guard let source = mealBoardPlacements.first(where: { $0.id == id }) else { return }
+        if copying {
+            var copy = source
+            copy.id = UUID()
+            copy.day = day
+            copy.meal = meal
+            mealBoardPlacements.append(copy)
+        } else if let index = mealBoardPlacements.firstIndex(where: { $0.id == id }) {
+            mealBoardPlacements[index].day = day
+            mealBoardPlacements[index].meal = meal
+        }
+        persistActive()
+    }
+
+    func deletePlacement(_ placement: MealBoardPlacement) {
+        mealBoardPlacements.removeAll { $0.id == placement.id }
+        persistActive()
+    }
+
+    /// Takes every recipe off the given days.
+    func clearBoard(days: Set<String>) {
+        mealBoardPlacements.removeAll { days.contains($0.day) }
+        persistActive()
+    }
+
+    /// Training or rest for a board day, as chosen there.
+    func boardDayType(for day: String) -> DayType? {
+        mealBoardDays.first { $0.day == day }?.dayType
+    }
+
+    func setBoardDayType(_ dayType: DayType, for day: String) {
+        if let index = mealBoardDays.firstIndex(where: { $0.day == day }) {
+            mealBoardDays[index].dayType = dayType
+        } else {
+            mealBoardDays.append(MealBoardDay(day: day, dayType: dayType))
+        }
         persistActive()
     }
 
@@ -1428,6 +1488,8 @@ final class DataStore {
         pantryLots = database.pantryLots
         cookingYields = database.cookingYields
         mealPreps = database.mealPreps
+        mealBoardPlacements = database.mealBoardPlacements
+        mealBoardDays = database.mealBoardDays
     }
 
     /// Re-reads the active database file from disk and updates in-memory state to match it.
@@ -1461,7 +1523,9 @@ final class DataStore {
             pantryLocations: pantryLocations,
             pantryLots: pantryLots,
             cookingYields: cookingYields,
-            mealPreps: mealPreps
+            mealPreps: mealPreps,
+            mealBoardPlacements: mealBoardPlacements,
+            mealBoardDays: mealBoardDays
         )
     }
 
@@ -1567,6 +1631,8 @@ final class DataStore {
         pantryLots = database.pantryLots
         cookingYields = database.cookingYields
         mealPreps = database.mealPreps
+        mealBoardPlacements = database.mealBoardPlacements
+        mealBoardDays = database.mealBoardDays
         persistActive(countingChange: false)
     }
 
@@ -1614,6 +1680,8 @@ final class DataStore {
         pantryLots = database.pantryLots
         cookingYields = database.cookingYields
         mealPreps = database.mealPreps
+        mealBoardPlacements = database.mealBoardPlacements
+        mealBoardDays = database.mealBoardDays
         linkUnlinkedDiaryEntries()
         moveMealPlansToMealStages()
         persistActive(countingChange: false)
@@ -1661,6 +1729,8 @@ final class DataStore {
         pantryLots = restoredDatabase.pantryLots
         cookingYields = restoredDatabase.cookingYields
         mealPreps = restoredDatabase.mealPreps
+        mealBoardPlacements = restoredDatabase.mealBoardPlacements
+        mealBoardDays = restoredDatabase.mealBoardDays
         persistActive(countingChange: false)
         refreshBackupTimestamp()
     }
@@ -1672,7 +1742,7 @@ final class DataStore {
     var hasUserData: Bool {
         !entries.isEmpty || !foodItems.isEmpty || !recipes.isEmpty || !supplements.isEmpty
             || !supplementLogs.isEmpty || !mealPlans.isEmpty || !bodyMeasurements.isEmpty || !progressPhotos.isEmpty
-            || !pantryLots.isEmpty || !mealPreps.isEmpty
+            || !pantryLots.isEmpty || !mealPreps.isEmpty || !mealBoardPlacements.isEmpty
     }
 
     /// Wipes every piece of data this app stores locally — entries, catalog, recipes, meal plan,
@@ -1695,6 +1765,8 @@ final class DataStore {
         pantryLots = []
         cookingYields = []
         mealPreps = []
+        mealBoardPlacements = []
+        mealBoardDays = []
         settings = .default
         try? fileManager.removeItem(at: backupURL)
         PhotoStore.deleteAll()

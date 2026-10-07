@@ -48,7 +48,9 @@ struct BarcodeScannerView: View {
             }
             Section("Código de Barras") {
                 TextField("Ex: 5601234567890", text: $manualCode)
+                    #if os(iOS)
                     .keyboardType(.numberPad)
+                    #endif
             }
             Section {
                 Button("Usar Código") {

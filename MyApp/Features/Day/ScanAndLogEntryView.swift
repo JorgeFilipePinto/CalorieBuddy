@@ -201,7 +201,9 @@ private struct LogScannedItemView: View {
                         Text("Doses (\(item.doseLabel))")
                         Spacer()
                         TextField("1", text: $quantityText)
+                            #if os(iOS)
                             .keyboardType(.decimalPad)
+                            #endif
                             .multilineTextAlignment(.trailing)
                             .frame(width: 80)
                     }

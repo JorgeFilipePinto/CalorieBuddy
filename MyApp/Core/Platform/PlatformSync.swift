@@ -332,7 +332,9 @@ final class PlatformSyncManager {
                 pantryLocations: try decode(AppCollection.pantryLocations, as: PantryLocation.self),
                 pantryLots: try decode(AppCollection.pantryLots, as: PantryLot.self),
                 cookingYields: try decode(AppCollection.cookingYields, as: CookingYield.self),
-                mealPreps: try decode(AppCollection.mealPreps, as: MealPrep.self)
+                mealPreps: try decode(AppCollection.mealPreps, as: MealPrep.self),
+                mealBoardPlacements: try decode(AppCollection.mealBoardPlacements, as: MealBoardPlacement.self),
+                mealBoardDays: try decode(AppCollection.mealBoardDays, as: MealBoardDay.self)
             )
 
             // The images, before switching databases, so the restored records show their photos
@@ -422,7 +424,9 @@ final class PlatformSyncManager {
                         "p_priority": plan.priority,
                         "p_notes": plan.notes ?? "",
                         "p_training": Self.targetsObject(plan.training),
-                        "p_rest": Self.targetsObject(plan.rest)
+                        "p_rest": Self.targetsObject(plan.rest),
+                        // The whole split per meal (an empty object clears it), like every other field.
+                        "p_meals": Self.mealsObject(plan.meals)
                     ])
                     pushed += 1
                 }
@@ -446,7 +450,7 @@ final class PlatformSyncManager {
     private func fetchRemotePlans() async throws -> [RemotePlan] {
         try await client.select(
             "nutrition_plans", as: RemotePlan.self,
-            select: "id,name,starts_on,ends_on,priority,notes,created_at,updated_at,deleted_at,nutrition_targets(day_type,kcal,protein_g,carbs_g,fat_g,water_ml)",
+            select: "id,name,starts_on,ends_on,priority,notes,created_at,updated_at,deleted_at,nutrition_targets(day_type,kcal,protein_g,carbs_g,fat_g,water_ml),nutrition_plan_meals(day_type,meal,protein_g,carbs_g,fat_g,notes)",
             order: "starts_on,id"
         )
     }
@@ -456,7 +460,21 @@ final class PlatformSyncManager {
         a.name == b.name && dayString(a.startsOn) == dayString(b.startsOn)
             && a.endsOn.map(dayString) == b.endsOn.map(dayString) && a.priority == b.priority
             && (a.notes ?? "").trimmingCharacters(in: .whitespacesAndNewlines) == (b.notes ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            && a.training == b.training && a.rest == b.rest && (a.deletedAt == nil) == (b.deletedAt == nil)
+            && a.training == b.training && a.rest == b.rest && a.meals == b.meals && (a.deletedAt == nil) == (b.deletedAt == nil)
+    }
+
+    /// `p_meals` of `save_nutrition_plan`: {day_type: {meal: {protein_g, carbs_g, fat_g, notes}}}.
+    private static func mealsObject(_ meals: [String: [String: PlanMealTargets]]) -> [String: Any] {
+        meals.mapValues { day in
+            day.mapValues { targets -> [String: Any] in
+                var row: [String: Any] = [:]
+                if let protein = targets.proteinG { row["protein_g"] = protein }
+                if let carbs = targets.carbsG { row["carbs_g"] = carbs }
+                if let fat = targets.fatG { row["fat_g"] = fat }
+                if let notes = targets.notes, !notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { row["notes"] = notes }
+                return row
+            }
+        }
     }
 
     private static func targetsObject(_ targets: NutritionTargets) -> [String: Int] {
@@ -568,6 +586,8 @@ final class PlatformSyncManager {
         case AppCollection.pantryLots: try merge(&database.pantryLots, PantryLot.self)
         case AppCollection.cookingYields: try merge(&database.cookingYields, CookingYield.self)
         case AppCollection.mealPreps: try merge(&database.mealPreps, MealPrep.self)
+        case AppCollection.mealBoardPlacements: try merge(&database.mealBoardPlacements, MealBoardPlacement.self)
+        case AppCollection.mealBoardDays: try merge(&database.mealBoardDays, MealBoardDay.self)
         case AppCollection.settings:
             // One document; it can't be deleted, only replaced.
             guard let data else { return }
@@ -1106,6 +1126,16 @@ private struct RemotePlan: Decodable {
     let updated_at: String
     let deleted_at: String?
     let nutrition_targets: [Targets]
+    let nutrition_plan_meals: [Meal]?
+
+    struct Meal: Decodable {
+        let day_type: String
+        let meal: String
+        let protein_g: Double?
+        let carbs_g: Double?
+        let fat_g: Double?
+        let notes: String?
+    }
 
     /// As the app models it (`nil` if incomplete — the database always saves both targets).
     var plan: NutritionPlan? {
@@ -1121,6 +1151,11 @@ private struct RemotePlan: Decodable {
             notes: notes,
             training: training.targets,
             rest: rest.targets,
+            meals: (nutrition_plan_meals ?? []).reduce(into: [:]) { meals, row in
+                let targets = PlanMealTargets(proteinG: row.protein_g, carbsG: row.carbs_g, fatG: row.fat_g, notes: row.notes)
+                guard !targets.isEmpty else { return }
+                meals[row.day_type, default: [:]][row.meal] = targets
+            },
             createdAt: SupabaseClient.date(fromTimestamp: created_at) ?? .now,
             updatedAt: SupabaseClient.date(fromTimestamp: updated_at) ?? .now,
             deletedAt: deleted_at.flatMap(SupabaseClient.date(fromTimestamp:))
@@ -1149,6 +1184,9 @@ private struct AppCollection {
     static let pantryLots = "pantryLots"
     static let cookingYields = "cookingYields"
     static let mealPreps = "mealPreps"
+    /// The week board (no typed tables: app_documents only, athlete-only like every document).
+    static let mealBoardPlacements = "mealBoardPlacements"
+    static let mealBoardDays = "mealBoardDays"
 
     let name: String
     let documents: [(id: String, value: any Encodable)]
@@ -1186,6 +1224,8 @@ private struct AppCollection {
             AppCollection(pantryLots, database.pantryLots),
             AppCollection(cookingYields, database.cookingYields),
             AppCollection(mealPreps, database.mealPreps),
+            AppCollection(mealBoardPlacements, database.mealBoardPlacements),
+            AppCollection(mealBoardDays, database.mealBoardDays),
             AppCollection(name: settings, documents: [("current", database.settings)])
         ]
     }

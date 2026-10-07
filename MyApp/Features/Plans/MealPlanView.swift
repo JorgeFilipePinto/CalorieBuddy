@@ -714,7 +714,9 @@ struct LogMealPlanOptionView: View {
             }
         }
         .navigationTitle(option.label)
+        #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
+        #endif
         .onAppear {
             guard !didLoadLines, let recipe else { return }
             lines = recipe.items
@@ -835,7 +837,9 @@ struct FoodSubstitutionView: View {
                             Text("Quantidade")
                             Spacer()
                             TextField("0", text: $amountText)
+                                #if os(iOS)
                                 .keyboardType(.decimalPad)
+                                #endif
                                 .multilineTextAlignment(.trailing)
                                 .frame(width: 80)
                             Text(currentFood.unit == .unit ? "unid." : currentFood.unit.baseUnit.shortLabel)
@@ -881,7 +885,9 @@ struct FoodSubstitutionView: View {
             }
             .searchable(text: $searchText, prompt: "Procurar alimento")
             .navigationTitle("Substituir Alimento")
+            #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
+            #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancelar") { dismiss() }
@@ -1048,7 +1054,9 @@ struct MealPlanPickerView: View {
                 }
             }
             .navigationTitle("Do Plano Alimentar")
+            #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
+            #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancelar") { dismiss() }
@@ -1098,7 +1106,9 @@ struct RecipeLinkPickerView: View {
             }
             .searchable(text: $searchText, prompt: "Procurar receita")
             .navigationTitle("Ligar a Receita")
+            #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
+            #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancelar") { dismiss() }

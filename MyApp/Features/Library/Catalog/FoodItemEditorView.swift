@@ -143,7 +143,9 @@ struct FoodItemEditorView: View {
                         Text("Tamanho da dose")
                         Spacer()
                         TextField("100", text: $doseSizeText)
+                            #if os(iOS)
                             .keyboardType(.decimalPad)
+                            #endif
                             .multilineTextAlignment(.trailing)
                             .frame(width: 80)
                         Text(unit.shortLabel).foregroundStyle(.secondary)
@@ -247,7 +249,7 @@ struct FoodItemEditorView: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancelar") { dismiss() }
                 }
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .barTrailing) {
                     Button {
                         showingJSONImport = true
                     } label: {
@@ -297,7 +299,9 @@ struct FoodItemEditorView: View {
             HStack {
                 TextField("Nome", text: $value.name)
                 TextField("Qtd.", value: $value.amount, format: .number)
+                    #if os(iOS)
                     .keyboardType(.decimalPad)
+                    #endif
                     .multilineTextAlignment(.trailing)
                     .frame(width: 60)
                 TextField("un.", text: $value.unit)

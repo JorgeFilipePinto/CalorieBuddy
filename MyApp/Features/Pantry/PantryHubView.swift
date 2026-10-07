@@ -64,10 +64,15 @@ struct PantryHubView: View {
                         Label("Planeamento de Marmitas", systemImage: "takeoutbag.and.cup.and.straw")
                     }
                 }
+                NavigationLink {
+                    WeekBoardView()
+                } label: {
+                    Label("Quadro Semanal", systemImage: "calendar.day.timeline.left")
+                }
             } header: {
                 Text("Marmitas")
             } footer: {
-                Text("Escolhe receitas, quantas marmitas e quanto pesa cada uma já cozinhada: a app calcula o que pesar em cru, confirma o stock e faz a lista de compras.")
+                Text("Escolhe receitas, quantas marmitas e quanto pesa cada uma já cozinhada: a app calcula o que pesar em cru, confirma o stock e faz a lista de compras. No Quadro Semanal pões receitas em cada refeição da semana e vês cada dia contra o teu plano.")
             }
 
             Section("Definições") {

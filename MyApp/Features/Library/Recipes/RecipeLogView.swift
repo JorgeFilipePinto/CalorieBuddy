@@ -96,7 +96,9 @@ struct RecipeLogView: View {
             }
         }
         .navigationTitle(recipe.name)
+        #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
+        #endif
         .onAppear(perform: load)
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {

@@ -59,7 +59,7 @@ struct SupplementsListView: View {
         .trackScreen("Suplementos")
         .searchable(text: $searchText, prompt: "Procurar por nome")
         .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
+            ToolbarItem(placement: .barLeading) {
                 Picker("Ordenar por", selection: $sortOrder) {
                     ForEach(ItemSortOrder.allCases) { order in
                         Text(order.label).tag(order)

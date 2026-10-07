@@ -120,7 +120,7 @@ struct RecipeEditorView: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancelar") { dismiss() }
                 }
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .barTrailing) {
                     Button {
                         showingJSONImport = true
                     } label: {
@@ -240,7 +240,9 @@ private struct RecipeComponentPickerView: View {
                 }
             }
             .navigationTitle("Adicionar Alimentos")
+            #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
+            #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancelar") { dismiss() }
@@ -342,7 +344,9 @@ struct RecipeIngredientEditorView: View {
                         Text("Quantidade por omissão")
                         Spacer()
                         TextField("0", text: $amountText)
+                            #if os(iOS)
                             .keyboardType(.decimalPad)
+                            #endif
                             .multilineTextAlignment(.trailing)
                             .frame(width: 80)
                         Text(current.unit.shortLabel)
@@ -369,7 +373,9 @@ struct RecipeIngredientEditorView: View {
                 }
             }
             .navigationTitle(current.name)
+            #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
+            #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancelar") { dismiss() }

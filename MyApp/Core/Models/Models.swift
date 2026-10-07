@@ -1057,12 +1057,14 @@ struct NutritionPlan: Identifiable, Codable, Equatable, PrioritizedPlan {
     var notes: String?
     var training: NutritionTargets
     var rest: NutritionTargets
+    /// The split per meal, by day type and meal raw value (see `meal(_:on:)` in WeekBoard.swift).
+    var meals: [String: [String: PlanMealTargets]] = [:]
     var createdAt: Date = Date()
     var updatedAt: Date = Date()
     var deletedAt: Date?
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, startsOn, endsOn, priority, notes, training, rest, createdAt, updatedAt, deletedAt
+        case id, name, startsOn, endsOn, priority, notes, training, rest, meals, createdAt, updatedAt, deletedAt
     }
 
     init(
@@ -1074,6 +1076,7 @@ struct NutritionPlan: Identifiable, Codable, Equatable, PrioritizedPlan {
         notes: String? = nil,
         training: NutritionTargets,
         rest: NutritionTargets,
+        meals: [String: [String: PlanMealTargets]] = [:],
         createdAt: Date = Date(),
         updatedAt: Date = Date(),
         deletedAt: Date? = nil
@@ -1086,6 +1089,7 @@ struct NutritionPlan: Identifiable, Codable, Equatable, PrioritizedPlan {
         self.notes = notes
         self.training = training
         self.rest = rest
+        self.meals = meals
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.deletedAt = deletedAt
@@ -1101,9 +1105,28 @@ struct NutritionPlan: Identifiable, Codable, Equatable, PrioritizedPlan {
         notes = try container.decodeIfPresent(String.self, forKey: .notes)
         training = try container.decode(NutritionTargets.self, forKey: .training)
         rest = try container.decode(NutritionTargets.self, forKey: .rest)
+        meals = try container.decodeIfPresent([String: [String: PlanMealTargets]].self, forKey: .meals) ?? [:]
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
         deletedAt = try container.decodeIfPresent(Date.self, forKey: .deletedAt)
+    }
+
+    /// `meals` only when there are some, so plans without a split keep the JSON (and the sync
+    /// hashes) they had before it existed.
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(startsOn, forKey: .startsOn)
+        try container.encodeIfPresent(endsOn, forKey: .endsOn)
+        try container.encode(priority, forKey: .priority)
+        try container.encodeIfPresent(notes, forKey: .notes)
+        try container.encode(training, forKey: .training)
+        try container.encode(rest, forKey: .rest)
+        if !meals.isEmpty { try container.encode(meals, forKey: .meals) }
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(updatedAt, forKey: .updatedAt)
+        try container.encodeIfPresent(deletedAt, forKey: .deletedAt)
     }
 }
 
@@ -1374,6 +1397,8 @@ struct AppDatabase: Codable {
     var pantryLots: [PantryLot]
     var cookingYields: [CookingYield]
     var mealPreps: [MealPrep]
+    var mealBoardPlacements: [MealBoardPlacement]
+    var mealBoardDays: [MealBoardDay]
 
     init(
         version: Int,
@@ -1395,7 +1420,9 @@ struct AppDatabase: Codable {
         pantryLocations: [PantryLocation] = [],
         pantryLots: [PantryLot] = [],
         cookingYields: [CookingYield] = [],
-        mealPreps: [MealPrep] = []
+        mealPreps: [MealPrep] = [],
+        mealBoardPlacements: [MealBoardPlacement] = [],
+        mealBoardDays: [MealBoardDay] = []
     ) {
         self.version = version
         self.exportedAt = exportedAt
@@ -1417,12 +1444,15 @@ struct AppDatabase: Codable {
         self.pantryLots = pantryLots
         self.cookingYields = cookingYields
         self.mealPreps = mealPreps
+        self.mealBoardPlacements = mealBoardPlacements
+        self.mealBoardDays = mealBoardDays
     }
 
     private enum CodingKeys: String, CodingKey {
         case version, exportedAt, settings, entries, foodItems, recipes, stores,
              supplementCategories, supplements, supplementLogs, stockLocations, mealPlans, nutritionPlans,
-             bodyMeasurements, progressPhotos, foodCategories, pantryLocations, pantryLots, cookingYields, mealPreps
+             bodyMeasurements, progressPhotos, foodCategories, pantryLocations, pantryLots, cookingYields, mealPreps,
+             mealBoardPlacements, mealBoardDays
     }
 
     /// Databases written before several meal plans existed had at most one, under `mealPlan`.
@@ -1457,5 +1487,7 @@ struct AppDatabase: Codable {
         pantryLots = try container.decodeIfPresent([PantryLot].self, forKey: .pantryLots) ?? []
         cookingYields = try container.decodeIfPresent([CookingYield].self, forKey: .cookingYields) ?? []
         mealPreps = try container.decodeIfPresent([MealPrep].self, forKey: .mealPreps) ?? []
+        mealBoardPlacements = try container.decodeIfPresent([MealBoardPlacement].self, forKey: .mealBoardPlacements) ?? []
+        mealBoardDays = try container.decodeIfPresent([MealBoardDay].self, forKey: .mealBoardDays) ?? []
     }
 }

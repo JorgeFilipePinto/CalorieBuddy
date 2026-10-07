@@ -126,7 +126,9 @@ struct TrendsView: View {
         }
         .navigationTitle("Evolução")
         .trackScreen("Evolução")
+        #if os(iOS)
         .navigationBarHidden(isLandscapeFullScreen)
+        #endif
         .task(id: rangeDays) {
             isLoading = true
             await healthKit.requestAuthorization()
@@ -317,7 +319,7 @@ struct TrendsView: View {
                 .font(.caption)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
-                .background(isOn ? metric.color.opacity(0.25) : Color(.secondarySystemBackground))
+                .background(isOn ? metric.color.opacity(0.25) : Color.secondaryBackground)
                 .foregroundStyle(isOn ? metric.color : .secondary)
                 .clipShape(Capsule())
         }
