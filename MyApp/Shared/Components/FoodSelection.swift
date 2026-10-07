@@ -10,6 +10,10 @@ struct FoodSelectionList<Header: View>: View {
     @Binding var selection: [UUID]
     /// Foods that can't be picked (e.g. already in the recipe).
     var excluded: Set<UUID> = []
+    /// An extra line under a food (e.g. how much of it is in stock).
+    var detail: ((FoodItem) -> String?)? = nil
+    /// The "Recent / Most used" shortlist above the catalog (from the diary).
+    var showsSuggestions = true
     @ViewBuilder var header: () -> Header
 
     @State private var searchText = ""
@@ -25,9 +29,9 @@ struct FoodSelectionList<Header: View>: View {
         let favorites = foods.filter(\.isFavorite)
         if !favorites.isEmpty { groups.append(("favorites", "Favoritos", favorites)) }
         let others = foods.filter { !$0.isFavorite }
-        for category in store.foodCategories {
-            let items = others.filter { $0.categoryID == category.id }
-            if !items.isEmpty { groups.append((category.id.uuidString, category.name, items)) }
+        for category in store.orderedFoodCategories {
+            let items = others.filter { $0.categoryID == category.id }.withPreparationsUnderBase().map(\.item)
+            if !items.isEmpty { groups.append((category.id.uuidString, store.categoryTitle(category), items)) }
         }
         let known = Set(store.foodCategories.map(\.id))
         let rest = others.filter { $0.categoryID.map { !known.contains($0) } ?? true }
@@ -48,7 +52,7 @@ struct FoodSelectionList<Header: View>: View {
             } else if groups.isEmpty {
                 ContentUnavailableView.search(text: searchText)
             } else {
-                if searchText.isEmpty {
+                if searchText.isEmpty && showsSuggestions {
                     UsageSuggestionsSection(
                         suggestions: { order in store.suggestedFoodItems(order).filter { !excluded.contains($0.id) } },
                         title: { item in item.brand.map { "\(item.name) (\($0))" } ?? item.name },
@@ -84,6 +88,11 @@ struct FoodSelectionList<Header: View>: View {
                     Text("dose \(item.doseLabel) · \(item.scaledCalories(quantity: 1)) kcal")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    if let detail = detail?(item) {
+                        Text(detail)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
             .contentShape(Rectangle())
@@ -237,24 +246,35 @@ struct SelectionMark: View {
     }
 }
 
-/// The bar under a list in multi-select mode: "Eliminar N …", disabled with nothing selected.
-struct SelectionDeleteBar: View {
+/// The bar under a list in multi-select mode: "Eliminar N …", disabled with nothing selected, with
+/// an optional action before it (e.g. a "Mover" menu).
+struct SelectionDeleteBar<Leading: View>: View {
     let count: Int
     /// Singular and plural ("alimento", "alimentos").
     let noun: (String, String)
+    @ViewBuilder var leading: Leading
     let onDelete: () -> Void
 
     var body: some View {
-        Button(role: .destructive, action: onDelete) {
-            Label(count == 0 ? "Escolhe o que eliminar" : "Eliminar \(count) \(count == 1 ? noun.0 : noun.1)",
-                  systemImage: "trash")
-                .frame(maxWidth: .infinity)
+        HStack {
+            leading
+            Button(role: .destructive, action: onDelete) {
+                Label(count == 0 ? "Escolhe o que eliminar" : "Eliminar \(count) \(count == 1 ? noun.0 : noun.1)",
+                      systemImage: "trash")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.red)
         }
-        .buttonStyle(.borderedProminent)
-        .tint(.red)
         .controlSize(.large)
         .disabled(count == 0)
         .padding(.horizontal)
         .padding(.bottom, 8)
+    }
+}
+
+extension SelectionDeleteBar where Leading == EmptyView {
+    init(count: Int, noun: (String, String), onDelete: @escaping () -> Void) {
+        self.init(count: count, noun: noun, leading: { EmptyView() }, onDelete: onDelete)
     }
 }

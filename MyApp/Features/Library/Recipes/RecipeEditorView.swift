@@ -5,6 +5,8 @@ struct RecipeEditorView: View {
     @Environment(\.dismiss) private var dismiss
 
     let recipeToEdit: Recipe?
+    /// Called right after saving (e.g. a meal prep adds the new recipe).
+    var onSave: ((Recipe) -> Void)?
 
     @State private var name = ""
     @State private var photoID: UUID?
@@ -14,8 +16,9 @@ struct RecipeEditorView: View {
     @State private var showingJSONImport = false
     @State private var editingItem: RecipeItem?
 
-    init(recipeToEdit: Recipe? = nil) {
+    init(recipeToEdit: Recipe? = nil, onSave: ((Recipe) -> Void)? = nil) {
         self.recipeToEdit = recipeToEdit
+        self.onSave = onSave
     }
 
     private var isValid: Bool {
@@ -117,7 +120,7 @@ struct RecipeEditorView: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancelar") { dismiss() }
                 }
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .barTrailing) {
                     Button {
                         showingJSONImport = true
                     } label: {
@@ -192,6 +195,7 @@ struct RecipeEditorView: View {
         } else {
             store.updateRecipe(recipe)
         }
+        onSave?(recipe)
         dismiss()
     }
 }
@@ -236,7 +240,9 @@ private struct RecipeComponentPickerView: View {
                 }
             }
             .navigationTitle("Adicionar Alimentos")
+            #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
+            #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancelar") { dismiss() }
@@ -338,7 +344,9 @@ struct RecipeIngredientEditorView: View {
                         Text("Quantidade por omissão")
                         Spacer()
                         TextField("0", text: $amountText)
+                            #if os(iOS)
                             .keyboardType(.decimalPad)
+                            #endif
                             .multilineTextAlignment(.trailing)
                             .frame(width: 80)
                         Text(current.unit.shortLabel)
@@ -365,7 +373,9 @@ struct RecipeIngredientEditorView: View {
                 }
             }
             .navigationTitle(current.name)
+            #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
+            #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancelar") { dismiss() }

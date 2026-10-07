@@ -99,7 +99,7 @@ struct RecipesListView: View {
         .searchable(text: $searchText, prompt: "Procurar por nome")
         .toolbar {
             if isSelecting {
-                ToolbarItem(placement: .topBarLeading) {
+                ToolbarItem(placement: .barLeading) {
                     let allVisible = Set(visibleRecipes.map(\.id))
                     Button(allVisible.isSubset(of: selectedIDs) ? "Nenhuma" : "Todas") {
                         selectedIDs = allVisible.isSubset(of: selectedIDs) ? [] : allVisible
@@ -112,11 +112,11 @@ struct RecipesListView: View {
                     }
                 }
             } else {
-            ToolbarItem(placement: .topBarTrailing) {
+            ToolbarItem(placement: .barTrailing) {
                 Button("Selecionar") { isSelecting = true }
                     .disabled(store.recipes.isEmpty)
             }
-            ToolbarItem(placement: .topBarLeading) {
+            ToolbarItem(placement: .barLeading) {
                 Picker("Ordenar por", selection: $sortOrder) {
                     ForEach(ItemSortOrder.allCases) { order in
                         Text(order.label).tag(order)

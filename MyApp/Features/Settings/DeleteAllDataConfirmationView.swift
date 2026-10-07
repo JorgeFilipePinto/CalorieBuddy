@@ -59,7 +59,9 @@ struct DeleteAllDataConfirmationView: View {
             }
             .padding()
             .navigationTitle("Zona de Perigo")
+            #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
+            #endif
             .interactiveDismissDisabled(isHolding)
         }
     }

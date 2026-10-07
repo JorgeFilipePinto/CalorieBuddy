@@ -110,7 +110,9 @@ struct LogWaterView: View {
                     Text("Quantidade (ml)")
                     Spacer()
                     TextField("330", text: $amountText)
+                        #if os(iOS)
                         .keyboardType(.numberPad)
+                        #endif
                         .multilineTextAlignment(.trailing)
                         .frame(width: 100)
                 }

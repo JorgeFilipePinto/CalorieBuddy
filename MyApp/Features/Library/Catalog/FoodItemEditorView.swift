@@ -45,6 +45,15 @@ struct FoodItemEditorView: View {
     @State private var vitamins: [NutrientValue] = []
 
     @State private var showingJSONImport = false
+    /// Its own weight change when cooked, in % (empty = the meal-prep reference for its name).
+    @State private var cookingChangeText = ""
+    /// A preparation to open (`nil` id-less = new one).
+    @State private var preparationToEdit: PreparationTarget?
+
+    private struct PreparationTarget: Identifiable {
+        let existing: FoodItem?
+        var id: UUID { existing?.id ?? UUID(uuidString: "00000000-0000-0000-0000-000000000000")! }
+    }
 
     init(
         itemToEdit: FoodItem? = nil,
@@ -96,6 +105,17 @@ struct FoodItemEditorView: View {
     }
 
     var body: some View {
+        // A preparation (Frango grelhado) is edited as one: its label comes from the raw food.
+        if let itemToEdit, let base = store.baseFood(of: itemToEdit) {
+            NavigationStack {
+                FoodPreparationEditorView(base: base, existing: itemToEdit)
+            }
+        } else {
+            editor
+        }
+    }
+
+    private var editor: some View {
         NavigationStack {
             Form {
                 #if canImport(UIKit)
@@ -110,8 +130,8 @@ struct FoodItemEditorView: View {
                     TextField("Marca (opcional)", text: $brand)
                     Picker("Categoria", selection: $categoryID) {
                         Text("Sem categoria").tag(UUID?.none)
-                        ForEach(store.foodCategories) { category in
-                            Text(category.name).tag(UUID?.some(category.id))
+                        ForEach(store.orderedFoodCategories) { category in
+                            Text(store.categoryTitle(category)).tag(UUID?.some(category.id))
                         }
                     }
                     Picker("Unidade", selection: $unit) {
@@ -123,7 +143,9 @@ struct FoodItemEditorView: View {
                         Text("Tamanho da dose")
                         Spacer()
                         TextField("100", text: $doseSizeText)
+                            #if os(iOS)
                             .keyboardType(.decimalPad)
+                            #endif
                             .multilineTextAlignment(.trailing)
                             .frame(width: 80)
                         Text(unit.shortLabel).foregroundStyle(.secondary)
@@ -158,6 +180,14 @@ struct FoodItemEditorView: View {
                     } footer: {
                         Text("Registados antes da lista fixa e que ela não reconhece. Desliza para remover.")
                     }
+                }
+
+                if unit.baseUnit != .unit {
+                    cookingSection
+                }
+
+                if let itemToEdit, itemToEdit.canHavePreparations {
+                    preparationsSection(itemToEdit)
                 }
 
                 Section {
@@ -219,7 +249,7 @@ struct FoodItemEditorView: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancelar") { dismiss() }
                 }
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .barTrailing) {
                     Button {
                         showingJSONImport = true
                     } label: {
@@ -269,7 +299,9 @@ struct FoodItemEditorView: View {
             HStack {
                 TextField("Nome", text: $value.name)
                 TextField("Qtd.", value: $value.amount, format: .number)
+                    #if os(iOS)
                     .keyboardType(.decimalPad)
+                    #endif
                     .multilineTextAlignment(.trailing)
                     .frame(width: 60)
                 TextField("un.", text: $value.unit)
@@ -311,6 +343,7 @@ struct FoodItemEditorView: View {
         if !imported.vitamins.isEmpty { vitamins = imported.vitamins }
         if let category = store.foodCategory(named: payload.category) { categoryID = category.id }
         if let barcode = payload.resolvedBarcode, !barcodes.contains(barcode) { barcodes.append(barcode) }
+        if let change = imported.cookingWeightChange { cookingChangeText = RecipeIngredientEditorView.number(change) }
     }
 
     private func formatted(_ value: Double) -> String {
@@ -345,6 +378,72 @@ struct FoodItemEditorView: View {
         prices = item.prices
         minerals = item.minerals
         vitamins = item.vitamins
+        cookingChangeText = item.cookingWeightChange.map { RecipeIngredientEditorView.number($0) } ?? ""
+    }
+
+    private var cookingChange: Double? {
+        LabelNutritionText.number(cookingChangeText.replacingOccurrences(of: "+", with: "").replacingOccurrences(of: "−", with: "-"))
+    }
+
+    /// The food's preparations (grelhado, cozido…), each a food of its own with the label worked out
+    /// from this one; a new one starts from the reference for the method.
+    private func preparationsSection(_ base: FoodItem) -> some View {
+        Section {
+            ForEach(store.preparations(of: base)) { preparation in
+                Button {
+                    preparationToEdit = PreparationTarget(existing: preparation)
+                } label: {
+                    HStack {
+                        Label(preparation.name, systemImage: preparation.preparation?.symbolName ?? "flame")
+                            .foregroundStyle(.primary)
+                        Spacer()
+                        Text("\(PantryFormat.percent(preparation.cookingWeightChange ?? 0)) · \(preparation.scaledCalories(quantity: 100 / max(preparation.baseDoseAmount, 1))) kcal/100")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            Button {
+                preparationToEdit = PreparationTarget(existing: nil)
+            } label: {
+                Label("Adicionar Preparação", systemImage: "plus")
+            }
+        } header: {
+            Text("Preparações")
+        } footer: {
+            Text("Cozido, grelhado, assado, estufado… cada um com o peso que ganha ou perde. Os valores vêm deste alimento (cru) e acompanham-no quando o alteras. Nas marmitas, uma receita com a preparação usa o stock deste alimento.")
+        }
+        .sheet(item: $preparationToEdit) { target in
+            NavigationStack {
+                FoodPreparationEditorView(base: base, existing: target.existing)
+            }
+        }
+    }
+
+    /// The weight change when cooked, for meal prep: its own value, or the reference for its name.
+    private var cookingSection: some View {
+        let reference = CookingYield.reference(for: name, in: store.cookingYields)
+        return Section {
+            HStack {
+                Text("Variação ao cozinhar")
+                Spacer()
+                TextField(reference.map { PantryFormat.percent($0.weightChange) } ?? "0", text: $cookingChangeText)
+                    #if os(iOS)
+                    .keyboardType(.numbersAndPunctuation)
+                    #endif
+                    .multilineTextAlignment(.trailing)
+                    .frame(width: 80)
+                Text("%").foregroundStyle(.secondary)
+            }
+        } header: {
+            Text("Confeção")
+        } footer: {
+            if let reference, cookingChange == nil {
+                Text("Vazio = referência \"\(reference.name)\" (\(PantryFormat.percent(reference.weightChange))), da Despensa → Variação na Confeção. Escreve um valor só para este alimento.")
+            } else {
+                Text("Quanto o peso muda de cru para cozinhado (+160 = arroz, −25 = frango), para calcular as marmitas. Vazio = sem variação.")
+            }
+        }
     }
 
     private func save() {
@@ -375,6 +474,7 @@ struct FoodItemEditorView: View {
             categoryID: categoryID
         )
         item.labelPhotoIDs = labelPhotoIDs
+        item.cookingWeightChange = unit.baseUnit == .unit ? nil : cookingChange
         item.saturatedFat = LabelNutritionText.number(saturatedFatText)
         item.sugars = LabelNutritionText.number(sugarsText)
         item.fiber = LabelNutritionText.number(fiberText)

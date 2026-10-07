@@ -2,7 +2,7 @@ import Foundation
 
 /// The app's search: every word typed must appear somewhere in the item's fields, ignoring case
 /// and accents — "acucar mascavado" finds "Açúcar Mascavado", "frango peito" finds "Peito de Frango".
-enum SearchMatch {
+nonisolated enum SearchMatch {
     static func normalized(_ text: String) -> String {
         text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil).lowercased()
     }

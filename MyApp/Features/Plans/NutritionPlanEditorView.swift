@@ -18,6 +18,9 @@ struct NutritionPlanEditorView: View {
     @State private var notes = ""
     @State private var training = NutritionPlanEditorView.defaultTargets
     @State private var rest = NutritionPlanEditorView.defaultTargets
+    /// Holds the split per meal while editing (only its `meals` is used).
+    @State private var mealsHolder = NutritionPlan(name: "", startsOn: .now, training: NutritionPlanEditorView.defaultTargets,
+                                                   rest: NutritionPlanEditorView.defaultTargets)
 
     private static let defaultTargets = NutritionTargets(kcal: 2500, proteinG: 150, carbsG: 300, fatG: 80, waterML: 3000)
 
@@ -76,6 +79,25 @@ struct NutritionPlanEditorView: View {
 
                 targetsSection(title: "Dias de Treino", symbolName: DayType.training.symbolName, targets: $training)
                 targetsSection(title: "Dias de Descanso", symbolName: DayType.rest.symbolName, targets: $rest)
+
+                Section {
+                    ForEach(DayType.allCases) { dayType in
+                        NavigationLink {
+                            PlanMealsEditorView(dayType: dayType, targets: dayType == .training ? training : rest, plan: $mealsHolder)
+                        } label: {
+                            LabeledContent {
+                                let count = mealsHolder.meals(on: dayType).count
+                                Text(count == 0 ? "—" : "\(count) \(count == 1 ? "refeição" : "refeições")")
+                            } label: {
+                                Label("Refeições — \(dayType.displayName)", systemImage: dayType.symbolName)
+                            }
+                        }
+                    }
+                } header: {
+                    Text("Divisão por Refeição")
+                } footer: {
+                    Text("Macros previstos para cada refeição e sugestões de alimentação. Usados no Quadro Semanal.")
+                }
             }
             .navigationTitle(planToEdit == nil ? "Novo Plano" : "Editar Plano")
             .toolbar {
@@ -139,6 +161,7 @@ struct NutritionPlanEditorView: View {
             notes = planToEdit.notes ?? ""
             training = planToEdit.training
             rest = planToEdit.rest
+            mealsHolder.meals = planToEdit.meals
             return
         }
 
@@ -149,6 +172,7 @@ struct NutritionPlanEditorView: View {
             notes = duplicateFrom.notes ?? ""
             training = duplicateFrom.training
             rest = duplicateFrom.rest
+            mealsHolder.meals = duplicateFrom.meals
         }
         startsOn = defaultStartDate()
         // A duplicated temporary plan keeps the original's length (e.g. the same 3-week block).
@@ -185,6 +209,7 @@ struct NutritionPlanEditorView: View {
             notes: trimmedNotes.isEmpty ? nil : trimmedNotes,
             training: training,
             rest: rest,
+            meals: mealsHolder.meals,
             createdAt: planToEdit?.createdAt ?? Date()
         )
         store.saveNutritionPlan(plan)

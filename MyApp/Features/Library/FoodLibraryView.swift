@@ -38,6 +38,16 @@ struct FoodLibraryView: View {
 
             Section {
                 NavigationLink {
+                    PantryHubView()
+                } label: {
+                    Label("Despensa e Marmitas", systemImage: "refrigerator")
+                }
+            } footer: {
+                Text("O stock de comida em casa, com validades, e o planeamento de marmitas com a lista de compras.")
+            }
+
+            Section {
+                NavigationLink {
                     SupplementsListView()
                 } label: {
                     Label("Suplementos", systemImage: "pills.fill")

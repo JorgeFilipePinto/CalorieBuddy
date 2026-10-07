@@ -150,7 +150,9 @@ struct SupplementEditorView: View {
                         Text("Tamanho total")
                         Spacer()
                         TextField("900", text: $totalSizeText)
+                            #if os(iOS)
                             .keyboardType(.decimalPad)
+                            #endif
                             .multilineTextAlignment(.trailing)
                             .frame(width: 80)
                         Text(unit.shortLabel).foregroundStyle(.secondary)
@@ -168,7 +170,9 @@ struct SupplementEditorView: View {
                             Text("Número de doses")
                             Spacer()
                             TextField("30", text: $doseCountText)
+                                #if os(iOS)
                                 .keyboardType(.numberPad)
+                                #endif
                                 .multilineTextAlignment(.trailing)
                                 .frame(width: 80)
                         }
@@ -177,7 +181,9 @@ struct SupplementEditorView: View {
                             Text("Peso por dose")
                             Spacer()
                             TextField("30", text: $doseSizeText)
+                                #if os(iOS)
                                 .keyboardType(.decimalPad)
+                                #endif
                                 .multilineTextAlignment(.trailing)
                                 .frame(width: 80)
                             Text(unit.shortLabel).foregroundStyle(.secondary)
@@ -275,7 +281,9 @@ struct SupplementEditorView: View {
                             .buttonStyle(.plain)
                             Spacer()
                             TextField("0", value: $stock.remaining, format: .number)
+                                #if os(iOS)
                                 .keyboardType(.decimalPad)
+                                #endif
                                 .multilineTextAlignment(.trailing)
                                 .frame(width: 70)
                             Text(unit.shortLabel).foregroundStyle(.secondary)
@@ -293,7 +301,9 @@ struct SupplementEditorView: View {
                         Text("Avisar para comprar quando restar")
                         Spacer()
                         TextField("—", text: $lowStockThresholdText)
+                            #if os(iOS)
                             .keyboardType(.decimalPad)
+                            #endif
                             .multilineTextAlignment(.trailing)
                             .frame(width: 70)
                         Text(unit.shortLabel).foregroundStyle(.secondary)
@@ -309,7 +319,7 @@ struct SupplementEditorView: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancelar") { dismiss() }
                 }
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .barTrailing) {
                     Button {
                         showingJSONImport = true
                     } label: {
