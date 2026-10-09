@@ -795,7 +795,9 @@ final class PlatformSyncManager {
     /// the amount eaten in g / ml / units.
     private static func foodEntryRow(_ entry: FoodEntry, foods: [UUID: FoodItem]) -> [String: Any] {
         let food = entry.foodItemID.flatMap { foods[$0] }
-        let amount = food.flatMap { food in entry.quantity.map { $0 * food.baseDoseAmount } }
+        // Rounded as the column stores it (2 decimals): an amount that rounds to 0 would break the
+        // `quantity > 0` check and fail the whole sync, so it's sent as unknown instead.
+        let amount = food.flatMap { food in entry.quantity.map { clamp($0 * food.baseDoseAmount, max: 999_999) } }
         let amountUnit: String? = food.map { food in
             switch food.unit.baseUnit {
             case .milliliter: return "ml"
@@ -819,7 +821,7 @@ final class PlatformSyncManager {
             "salt_g": entry.salt.map { clamp($0, max: 9_999) } ?? NSNull(),
             "micronutrients": (entry.micronutrients ?? [:]).filter { $0.value.isFinite && $0.value >= 0 },
             "food_item_id": food?.id.uuidString ?? NSNull(),
-            "quantity": amount.flatMap { $0 > 0 ? clamp($0, max: 999_999) : nil } ?? NSNull(),
+            "quantity": amount.flatMap { $0 > 0 ? $0 : nil } ?? NSNull(),
             "unit": amount.flatMap { $0 > 0 ? amountUnit : nil } ?? NSNull(),
             "barcode": entry.barcode ?? NSNull(),
             "group_id": entry.groupID?.uuidString ?? NSNull(),
@@ -906,7 +908,7 @@ final class PlatformSyncManager {
     private static func pantryRow(_ value: any Encodable, foods: [FoodItem]) -> [String: Any]? {
         switch value {
         case let location as PantryLocation:
-            return ["id": location.id.uuidString, "name": String(location.name.prefix(120)), "source": "ios_app", "deleted_at": NSNull()]
+            return ["id": location.id.uuidString, "name": rowName(location.name, max: 120, fallback: "Local"), "source": "ios_app", "deleted_at": NSNull()]
         case let lot as PantryLot:
             let unit: String = switch foods.first(where: { $0.id == lot.foodItemID })?.unit.baseUnit {
             case .milliliter: "ml"
@@ -927,7 +929,7 @@ final class PlatformSyncManager {
         case let yield as CookingYield:
             return [
                 "id": yield.id.uuidString,
-                "name": String(yield.name.prefix(120)),
+                "name": rowName(yield.name, max: 120, fallback: "Alimento"),
                 "weight_change": min(max(yield.weightChange, -99.99), 1000),
                 "method": yield.method?.rawValue ?? NSNull(),
                 "source": "ios_app",
@@ -943,7 +945,7 @@ final class PlatformSyncManager {
             }
             return [
                 "id": prep.id.uuidString,
-                "name": String(prep.name.prefix(200)),
+                "name": rowName(prep.name, max: 200, fallback: "Marmitas"),
                 "items": items,
                 "location_id": prep.locationID?.uuidString ?? NSNull(),
                 "planned_at": SupabaseClient.timestamp(prep.createdAt),
@@ -1059,6 +1061,13 @@ final class PlatformSyncManager {
         let version = info?["CFBundleShortVersionString"] as? String ?? "?"
         let build = info?["CFBundleVersion"] as? String ?? "?"
         return "\(version) (\(build))"
+    }
+
+    /// The typed tables require a non-empty name (1–max characters). The meal-prep editor saves on
+    /// every keystroke, so a name can be blank — sending it as is would fail every sync after it.
+    private static func rowName(_ name: String, max: Int, fallback: String) -> String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return String((trimmed.isEmpty ? fallback : trimmed).prefix(max))
     }
 
     private static func clamp(_ value: Double, max upper: Double) -> Double {
