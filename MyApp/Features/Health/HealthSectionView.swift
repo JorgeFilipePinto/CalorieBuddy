@@ -4,10 +4,12 @@ import SwiftUI
 /// smart scale, the Health app) shows up here automatically. Water and coffee are logged from
 /// the Alimentos tab (`DrinksSections`).
 struct HealthSectionView: View {
+    @Environment(PlatformSyncManager.self) private var platform
     @Environment(HealthKitManager.self) private var healthKit
 
     @State private var showingLogWeight = false
     @State private var showingLogMeasurements = false
+    @State private var showingConsultation = false
     @State private var showingLogProgressPhotos = false
 
     /// A year of Apple Health data, so the monthly weight history has something to group.
@@ -28,6 +30,8 @@ struct HealthSectionView: View {
         Group {
             if healthKit.isSupported {
                 List {
+                    ConsultationCard(showingConsultation: $showingConsultation)
+                    examsSection
                     weightSection
                     BodyCompositionSections(part: .composition)
                     BodyCompositionSections(part: .circumferences)
@@ -51,6 +55,7 @@ struct HealthSectionView: View {
         }
         .refreshable {
             Haptics.light()
+            await platform.refresh()
             await healthKit.refresh(days: Self.historyDays)
         }
         .sheet(isPresented: $showingLogWeight) {
@@ -59,8 +64,24 @@ struct HealthSectionView: View {
         .sheet(isPresented: $showingLogMeasurements) {
             LogBodyMeasurementsView()
         }
+        .sheet(isPresented: $showingConsultation) {
+            LogBodyMeasurementsView(asConsultation: true)
+        }
         .sheet(isPresented: $showingLogProgressPhotos) {
             LogProgressPhotosView()
+        }
+    }
+
+    /// Clinical analyses and other exams, with their documents.
+    private var examsSection: some View {
+        Section {
+            NavigationLink {
+                ExamsView()
+            } label: {
+                Label("Exames", systemImage: "doc.text.magnifyingglass")
+            }
+        } footer: {
+            Text("Análises clínicas e outros exames, com o PDF ou as fotos. Só tu os vês.")
         }
     }
 

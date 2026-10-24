@@ -263,6 +263,7 @@ extension PersonalRecords {
 /// fastest sessions and most calories — per sport, for a chosen period. Each record opens the
 /// day it was set on.
 struct PersonalRecordsView: View {
+    @Environment(PlatformSyncManager.self) private var platform
     @Environment(HealthKitManager.self) private var healthKit
 
     private enum Period: String, CaseIterable, Identifiable {
@@ -347,6 +348,7 @@ struct PersonalRecordsView: View {
         }
         .refreshable {
             Haptics.light()
+            await platform.refresh()
             await healthKit.loadRecordWorkouts()
         }
     }

@@ -22,6 +22,8 @@ struct NutritionPlanEditorView: View {
     @State private var mealsHolder = NutritionPlan(name: "", startsOn: .now, training: NutritionPlanEditorView.defaultTargets,
                                                    rest: NutritionPlanEditorView.defaultTargets)
 
+    @State private var showingImport = false
+
     private static let defaultTargets = NutritionTargets(kcal: 2500, proteinG: 150, carbsG: 300, fatG: 80, waterML: 3000)
 
     init(planToEdit: NutritionPlan? = nil, duplicateFrom: NutritionPlan? = nil) {
@@ -104,17 +106,63 @@ struct NutritionPlanEditorView: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancelar") { dismiss() }
                 }
+                ToolbarItem(placement: .barTrailing) {
+                    Button {
+                        showingImport = true
+                    } label: {
+                        Label("Importar Plano (IA)", systemImage: "sparkles")
+                    }
+                }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Guardar") { save() }
                         .disabled(!isValid)
                 }
             }
             .onAppear(perform: populate)
+            .sheet(isPresented: $showingImport) {
+                JSONImportSheet(
+                    title: "Importar Plano",
+                    prompt: AIJSONImport.planPrompt,
+                    instructions: "Cola o texto do plano do nutricionista, ou envia uma foto do plano (para várias páginas, junta as restantes na conversa com a IA); a IA devolve os objetivos de treino e de descanso e a divisão por refeição, com as janelas horárias quando existirem. Preenche este formulário — confirma os valores antes de guardar. Um JSON escrito à mão também serve.",
+                    onImport: { json in try applyImport(json) }
+                )
+            }
             // Moving the start past the end would leave an invalid range; keep the end with it.
             .onChange(of: startsOn) {
                 if endsOn < startsOn { endsOn = startsOn }
             }
         }
+    }
+
+    /// Fills the editor from the AI's answer; whatever it leaves out stays as it was.
+    private func applyImport(_ json: String) throws {
+        let plan = try AIJSONImport.decodePlan(from: json)
+        if let imported = plan.name?.trimmingCharacters(in: .whitespacesAndNewlines), !imported.isEmpty { name = String(imported.prefix(80)) }
+        if let start = plan.startsOn.flatMap(Self.parseDay) { startsOn = start }
+        if let end = plan.endsOn.flatMap(Self.parseDay) {
+            isTemporary = true
+            endsOn = max(end, startsOn)
+        }
+        if let priority = plan.priority { self.priority = priority }
+        if let imported = plan.notes?.trimmingCharacters(in: .whitespacesAndNewlines), !imported.isEmpty { notes = String(imported.prefix(4000)) }
+        if let targets = plan.training, !targets.isEmpty { training = Self.merged(training, with: targets) }
+        if let targets = plan.rest, !targets.isEmpty { rest = Self.merged(rest, with: targets) }
+        let split = plan.mealSplit
+        if !split.isEmpty { mealsHolder.meals = split }
+    }
+
+    private static func merged(_ base: NutritionTargets, with imported: PlanImportPayload.Targets) -> NutritionTargets {
+        NutritionTargets(kcal: imported.kcal ?? base.kcal, proteinG: imported.proteinG ?? base.proteinG,
+                         carbsG: imported.carbsG ?? base.carbsG, fatG: imported.fatG ?? base.fatG,
+                         waterML: imported.waterML ?? base.waterML)
+    }
+
+    private static func parseDay(_ text: String) -> Date? {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.date(from: text.trimmingCharacters(in: .whitespaces))
     }
 
     @ViewBuilder

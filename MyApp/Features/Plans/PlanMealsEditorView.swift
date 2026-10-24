@@ -19,7 +19,7 @@ struct PlanMealsEditorView: View {
             } header: {
                 Text("Soma das Refeições")
             } footer: {
-                Text("Opcional: deixa vazia uma refeição que não se aplica. As calorias saem dos macros (4/4/9).")
+                Text("Opcional: deixa vazia uma refeição que não se aplica. As calorias saem dos macros (4/4/9). Num dia de treino, as janelas horárias dizem qual é a refeição pré e pós-treino conforme a hora do treino.")
             }
 
             ForEach(MealType.allCases) { meal in
@@ -36,6 +36,19 @@ struct PlanMealsEditorView: View {
             macroField("Proteína (g)", value: current.proteinG) { var t = current; t.proteinG = $0; update(t) }
             macroField("Hidratos (g)", value: current.carbsG) { var t = current; t.carbsG = $0; update(t) }
             macroField("Gordura (g)", value: current.fatG) { var t = current; t.fatG = $0; update(t) }
+            Toggle("Janela horária", isOn: Binding(
+                get: { current.hasWindow },
+                set: { on in
+                    var t = current
+                    t.startsAt = on ? (t.startsAt ?? "12:00") : nil
+                    t.endsAt = on ? (t.endsAt ?? "13:00") : nil
+                    update(t)
+                }
+            ))
+            if current.hasWindow {
+                timeRow("Das", clock: current.startsAt) { var t = current; t.startsAt = $0; update(t) }
+                timeRow("Até às", clock: current.endsAt) { var t = current; t.endsAt = $0; update(t) }
+            }
             TextField("Sugestões de alimentação", text: Binding(
                 get: { current.notes ?? "" },
                 set: { text in
@@ -54,6 +67,13 @@ struct PlanMealsEditorView: View {
                 }
             }
         }
+    }
+
+    private func timeRow(_ label: String, clock: String?, set: @escaping (String) -> Void) -> some View {
+        DatePicker(label, selection: Binding(
+            get: { MealTiming.date(fromClock: clock) ?? .now },
+            set: { set(MealTiming.clock(from: $0)) }
+        ), displayedComponents: .hourAndMinute)
     }
 
     private func macroField(_ label: String, value: Double?, set: @escaping (Double?) -> Void) -> some View {

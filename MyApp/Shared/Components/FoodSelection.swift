@@ -121,6 +121,7 @@ extension FoodSelectionList where Header == EmptyView {
 /// start with), the totals, and — when logging — the meal. Swipe a food to drop it.
 struct FoodAmountsView: View {
     @Environment(DataStore.self) private var store
+    @Environment(KitchenScaleManager.self) private var scale
 
     let confirmTitle: String
     /// Shows the meal picker (logging to the diary); `nil` = no meal (adding to a recipe).
@@ -158,6 +159,7 @@ struct FoodAmountsView: View {
     var body: some View {
         Form {
             Section {
+                KitchenScaleStatusRow()
                 ForEach(foodIDs, id: \.self) { id in
                     if let food = food(id) {
                         amountRow(food)
@@ -215,6 +217,15 @@ struct FoodAmountsView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
+            if scale.isConnected, let grams = scale.grams, let value = scaleAmount(grams, in: food.unit) {
+                Button {
+                    amounts[food.id] = RecipeIngredientEditorView.number(value)
+                } label: {
+                    Image(systemName: "scalemass")
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("Usar o peso da balança")
+            }
             TextField("0", text: Binding(
                 get: { amounts[food.id] ?? "" },
                 set: { amounts[food.id] = $0 }
@@ -232,6 +243,16 @@ struct FoodAmountsView: View {
 
     private func food(_ id: UUID) -> FoodItem? {
         store.foodItems.first { $0.id == id }
+    }
+
+    /// The scale's grams in the food's unit (1 g = 1 ml); nothing for foods counted in units.
+    private func scaleAmount(_ grams: Int, in unit: MeasurementUnit) -> Double? {
+        guard grams > 0 else { return nil }
+        switch unit {
+        case .gram, .milliliter: return Double(grams)
+        case .kilogram, .liter: return Double(grams) / 1000
+        case .unit: return nil
+        }
     }
 }
 

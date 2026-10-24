@@ -3,6 +3,7 @@ import SwiftUI
 /// Landing page for everything food-related: today's water and coffee, then the meal plan,
 /// recipes, the food catalog and supplements. Each is its own dedicated page; stores and stocks are managed from Settings.
 struct FoodLibraryView: View {
+    @Environment(PlatformSyncManager.self) private var platform
     @Environment(HealthKitManager.self) private var healthKit
     @State private var showingLogWater = false
 
@@ -48,6 +49,16 @@ struct FoodLibraryView: View {
 
             Section {
                 NavigationLink {
+                    KitchenScaleView()
+                } label: {
+                    Label("Balança", systemImage: "scalemass")
+                }
+            } footer: {
+                Text("Liga a balança de cozinha Prozis Bit Scale por Bluetooth para pesar os alimentos ao registá-los.")
+            }
+
+            Section {
+                NavigationLink {
                     SupplementsListView()
                 } label: {
                     Label("Suplementos", systemImage: "pills.fill")
@@ -62,6 +73,7 @@ struct FoodLibraryView: View {
         // and a short refresh here would replace the longer history other tabs loaded.
         .refreshable {
             Haptics.light()
+            await platform.refresh()
             await healthKit.refresh()
         }
         .sheet(isPresented: $showingLogWater) {

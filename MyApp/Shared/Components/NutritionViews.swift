@@ -21,6 +21,54 @@ struct LabelNutritionText: Equatable {
     }
 }
 
+/// Switching a label between "per 100 g/ml" and "per dose" changes what the numbers mean, so the numbers have
+/// to follow: 148 kcal for a 40 g dose is 370 kcal per 100 g. Used by the food and supplement editors when the
+/// "Valores indicados" selector is switched.
+enum NutritionBasisConversion {
+    /// What the typed values are multiplied by, or `nil` when there is nothing to convert: the same basis,
+    /// something counted in units (always per dose), or no readable dose.
+    static func factor(from old: NutritionBasis, to new: NutritionBasis, doseSize: Double?, unit: MeasurementUnit) -> Double? {
+        guard old != new, unit != .unit, let doseSize, doseSize > 0 else { return nil }
+        let doseAmount = doseSize * unit.baseMultiplier
+        return new == .perDose ? doseAmount / 100 : 100 / doseAmount
+    }
+
+    /// `value × factor` to four significant figures, so a round trip doesn't drift and tiny amounts survive.
+    static func scaled(_ value: Double, by factor: Double) -> Double {
+        Double(String(format: "%.4g", value * factor)) ?? value * factor
+    }
+}
+
+extension LabelNutritionText {
+    /// Every filled-in value times `factor` (energy in whole kcal); empty stays empty.
+    func scaled(by factor: Double) -> LabelNutritionText {
+        func convert(_ text: String) -> String {
+            guard let value = Self.number(text) else { return text }
+            return Self.text(NutritionBasisConversion.scaled(value, by: factor))
+        }
+        var result = LabelNutritionText(calories: calories, fat: convert(fat), saturatedFat: convert(saturatedFat), carbs: convert(carbs),
+                                        sugars: convert(sugars), fiber: convert(fiber), protein: convert(protein), salt: convert(salt))
+        if let kcal = Self.number(calories) { result.calories = String(Int((kcal * factor).rounded())) }
+        return result
+    }
+}
+
+extension Dictionary where Key == Micronutrient, Value == Double {
+    func scaled(by factor: Double) -> [Micronutrient: Double] {
+        mapValues { NutritionBasisConversion.scaled($0, by: factor) }
+    }
+}
+
+extension Array where Element == NutrientValue {
+    func scaled(by factor: Double) -> [NutrientValue] {
+        map { value in
+            var scaled = value
+            scaled.amount = NutritionBasisConversion.scaled(value.amount, by: factor)
+            return scaled
+        }
+    }
+}
+
 /// The rows of a nutrition label, in the order EU labels use (energy, fat, of which saturates,
 /// carbohydrate, of which sugars, fibre, protein, salt), each a number field — the amounts as
 /// printed on the label. Goes inside a Form `Section`.

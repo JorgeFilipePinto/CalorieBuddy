@@ -410,19 +410,23 @@ final class HealthKitManager {
         }
     }
 
-    func logWeight(kilograms: Double) async {
-        guard isSupported, kilograms > 0 else { return }
+    /// Writes a weight reading to Apple Health (at `date`); false when it couldn't be saved.
+    @discardableResult
+    func logWeight(kilograms: Double, date: Date = .now) async -> Bool {
+        guard isSupported, kilograms > 0 else { return false }
         let sample = HKQuantitySample(
             type: weightType,
             quantity: HKQuantity(unit: .gramUnit(with: .kilo), doubleValue: kilograms),
-            start: .now,
-            end: .now
+            start: date,
+            end: date
         )
         do {
             try await store.save(sample)
             await refresh()
+            return true
         } catch {
             lastError = error.localizedDescription
+            return false
         }
     }
 
@@ -755,7 +759,8 @@ final class HealthKitManager {
     func requestAuthorization() async {}
     func refresh(days: Int = 30) async {}
     func logWater(liters: Double) async {}
-    func logWeight(kilograms: Double) async {}
+    @discardableResult
+    func logWeight(kilograms: Double, date: Date = .now) async -> Bool { false }
     @discardableResult
     func logBodyMetric(_ metric: BodyMetric, value: Double, date: Date) async -> Bool { false }
     func deleteBodyMetricSample(_ metric: BodyMetric, id: UUID) async {}

@@ -276,6 +276,227 @@ extension DiaryEntryImportPayload {
     }
 }
 
+/// A sporadic meal as an AI estimates it: the dish, a short description and what was eaten. Energy
+/// may be left out when the macros are there (4/4/9). Several objects are added up.
+struct MealEstimatePayload: Decodable {
+    var name: String
+    var description: String?
+    var calories: Int
+    var protein: Double?
+    var carbs: Double?
+    var fat: Double?
+    var saturatedFat: Double?
+    var sugars: Double?
+    var fiber: Double?
+    var salt: Double?
+
+    private enum CodingKeys: String, CodingKey {
+        case name, description, calories, protein, carbs, fat, saturatedFat, sugars, fiber, salt
+    }
+
+    init(name: String, description: String?, calories: Int, protein: Double?, carbs: Double?, fat: Double?,
+         saturatedFat: Double?, sugars: Double?, fiber: Double?, salt: Double?) {
+        self.name = name
+        self.description = description
+        self.calories = calories
+        self.protein = protein
+        self.carbs = carbs
+        self.fat = fat
+        self.saturatedFat = saturatedFat
+        self.sugars = sugars
+        self.fiber = fiber
+        self.salt = salt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decode(String.self, forKey: .name)
+        description = try container.decodeIfPresent(String.self, forKey: .description)
+        protein = try container.lenientDouble(forKey: .protein)
+        carbs = try container.lenientDouble(forKey: .carbs)
+        fat = try container.lenientDouble(forKey: .fat)
+        saturatedFat = try container.lenientDouble(forKey: .saturatedFat)
+        sugars = try container.lenientDouble(forKey: .sugars)
+        fiber = try container.lenientDouble(forKey: .fiber)
+        salt = try container.lenientDouble(forKey: .salt)
+        if let kcal = try container.lenientDouble(forKey: .calories) {
+            calories = Int(kcal.rounded())
+        } else if protein != nil || carbs != nil || fat != nil {
+            calories = Int(((protein ?? 0) * 4 + (carbs ?? 0) * 4 + (fat ?? 0) * 9).rounded())
+        } else {
+            throw AIImportError.invalidJSON
+        }
+    }
+}
+
+/// A nutrition plan as an AI reads it from the nutritionist's document (text, PDF or photos):
+/// everything is optional — what the answer leaves out stays as it was in the editor.
+struct PlanImportPayload: Decodable {
+    struct Targets: Decodable {
+        var kcal: Int?
+        var proteinG: Int?
+        var carbsG: Int?
+        var fatG: Int?
+        var waterML: Int?
+
+        private enum CodingKeys: String, CodingKey { case kcal, calories, proteinG, protein, carbsG, carbs, fatG, fat, waterMl, water }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            func whole(_ keys: CodingKeys...) throws -> Int? {
+                for key in keys { if let v = try c.lenientDouble(forKey: key) { return Int(v.rounded()) } }
+                return nil
+            }
+            proteinG = try whole(.proteinG, .protein)
+            carbsG = try whole(.carbsG, .carbs)
+            fatG = try whole(.fatG, .fat)
+            waterML = try whole(.waterMl, .water)
+            // Energy may be left out when the macros are there: 4/4/9.
+            kcal = try whole(.kcal, .calories) ?? ((proteinG != nil || carbsG != nil || fatG != nil)
+                ? (proteinG ?? 0) * 4 + (carbsG ?? 0) * 4 + (fatG ?? 0) * 9 : nil)
+        }
+
+        var isEmpty: Bool { kcal == nil && proteinG == nil && carbsG == nil && fatG == nil && waterML == nil }
+    }
+
+    struct Meal: Decodable {
+        var proteinG: Double?
+        var carbsG: Double?
+        var fatG: Double?
+        var notes: String?
+        var startsAt: String?
+        var endsAt: String?
+
+        private enum CodingKeys: String, CodingKey { case proteinG, carbsG, fatG, notes, startsAt, endsAt }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            proteinG = try c.lenientDouble(forKey: .proteinG)
+            carbsG = try c.lenientDouble(forKey: .carbsG)
+            fatG = try c.lenientDouble(forKey: .fatG)
+            notes = try c.decodeIfPresent(String.self, forKey: .notes)
+            startsAt = try c.decodeIfPresent(String.self, forKey: .startsAt)
+            endsAt = try c.decodeIfPresent(String.self, forKey: .endsAt)
+        }
+
+        /// As the app models it; the window only when both ends are times.
+        var targets: PlanMealTargets {
+            var targets = PlanMealTargets(proteinG: proteinG, carbsG: carbsG, fatG: fatG,
+                                          notes: notes?.trimmingCharacters(in: .whitespacesAndNewlines).prefix(1000).description)
+            if let start = MealTiming.minutes(startsAt), let end = MealTiming.minutes(endsAt) {
+                targets.startsAt = String(format: "%02d:%02d", start / 60, start % 60)
+                targets.endsAt = String(format: "%02d:%02d", end / 60, end % 60)
+            }
+            if targets.notes?.isEmpty == true { targets.notes = nil }
+            return targets
+        }
+    }
+
+    var name: String?
+    var startsOn: String?
+    var endsOn: String?
+    var priority: Int?
+    var notes: String?
+    var training: Targets?
+    var rest: Targets?
+    var meals: [String: [String: Meal]]?
+
+    private enum CodingKeys: String, CodingKey { case name, startsOn, endsOn, priority, notes, training, rest, meals }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decodeIfPresent(String.self, forKey: .name)
+        startsOn = try c.decodeIfPresent(String.self, forKey: .startsOn)
+        endsOn = try c.decodeIfPresent(String.self, forKey: .endsOn)
+        priority = try c.lenientDouble(forKey: .priority).map { min(max(Int($0.rounded()), 1), 5) }
+        notes = try c.decodeIfPresent(String.self, forKey: .notes)
+        training = try c.decodeIfPresent(Targets.self, forKey: .training)
+        rest = try c.decodeIfPresent(Targets.self, forKey: .rest)
+        meals = try c.decodeIfPresent([String: [String: Meal]].self, forKey: .meals)
+    }
+
+    /// The split per meal as `NutritionPlan.meals` keeps it: valid day types and meals only.
+    var mealSplit: [String: [String: PlanMealTargets]] {
+        var result: [String: [String: PlanMealTargets]] = [:]
+        for (dayType, meals) in meals ?? [:] where DayType(rawValue: dayType) != nil {
+            for (meal, payload) in meals where MealType(rawValue: meal) != nil {
+                let targets = payload.targets
+                if !targets.isEmpty { result[dayType, default: [:]][meal] = targets }
+            }
+        }
+        return result
+    }
+}
+
+/// Clinical analyses as an AI reads them from the lab's report (photos, a PDF or text): the
+/// report's fields and one result per analyte. A result that isn't a number goes in `valueText`.
+struct LabReportImportPayload: Decodable {
+    struct Result: Decodable {
+        var name: String
+        var group: String?
+        var value: Double?
+        var valueText: String?
+        var unit: String?
+        var refMin: Double?
+        var refMax: Double?
+        var refText: String?
+
+        private enum CodingKeys: String, CodingKey { case name, group, value, valueText, unit, refMin, refMax, refText }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            name = try c.decode(String.self, forKey: .name).trimmingCharacters(in: .whitespacesAndNewlines)
+            group = try c.decodeIfPresent(String.self, forKey: .group)
+            unit = try c.decodeIfPresent(String.self, forKey: .unit)
+            refText = try c.decodeIfPresent(String.self, forKey: .refText)
+            refMin = try? c.lenientDouble(forKey: .refMin)
+            refMax = try? c.lenientDouble(forKey: .refMax)
+            // A number (quoted or not), else the text the report gives.
+            if let number = try? c.lenientDouble(forKey: .value) {
+                value = number
+            } else {
+                valueText = try c.decodeIfPresent(String.self, forKey: .valueText)
+                    ?? (try? c.decodeIfPresent(String.self, forKey: .value))
+            }
+            if value == nil, (valueText ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                throw AIImportError.invalidJSON
+            }
+        }
+    }
+
+    var title: String?
+    var date: String?
+    var lab: String?
+    var notes: String?
+    var results: [Result]
+
+    /// As the app models it: only named results, ids of their own, the date when it is a valid day.
+    var report: LabReport {
+        let day = date.flatMap { Self.isDay($0) ? $0 : nil }
+        return LabReport(
+            title: title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "",
+            performedOn: day ?? "",
+            lab: lab, notes: notes,
+            results: results.filter { !$0.name.isEmpty }.map {
+                LabResult(name: $0.name, group: $0.group?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty, value: $0.value,
+                          valueText: $0.value == nil ? $0.valueText : nil, unit: $0.unit?.nilIfEmpty,
+                          refMin: $0.refMin, refMax: $0.refMax, refText: $0.refText?.nilIfEmpty)
+            }
+        )
+    }
+
+    private static func isDay(_ text: String) -> Bool {
+        text.range(of: #"^\d{4}-\d{2}-\d{2}$"#, options: .regularExpression) != nil
+    }
+}
+
+private extension String {
+    var nilIfEmpty: String? {
+        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
 /// A sports supplement as an AI describes it. Nutrition is per dose (supplements are always
 /// logged by the dose), and the category is a free name matched to — or added to — the user's own
 /// categories when imported.
@@ -427,6 +648,48 @@ enum AIJSONImport {
             return [single]
         }
         throw AIImportError.invalidJSON
+    }
+
+    /// One estimated sporadic meal: a single object, or an array whose items are added up.
+    static func decodeMealEstimate(from json: String) throws -> MealEstimatePayload {
+        let data = try data(from: json)
+        let items: [MealEstimatePayload]
+        if let array = try? decoder.decode([MealEstimatePayload].self, from: data), !array.isEmpty {
+            items = array
+        } else if let single = try? decoder.decode(MealEstimatePayload.self, from: data) {
+            items = [single]
+        } else {
+            throw AIImportError.invalidJSON
+        }
+        guard items.count > 1 else { return items[0] }
+        func sum(_ value: (MealEstimatePayload) -> Double?) -> Double? {
+            let values = items.compactMap(value)
+            return values.isEmpty ? nil : (values.reduce(0, +) * 10).rounded() / 10
+        }
+        return MealEstimatePayload(
+            name: items[0].name,
+            description: items.map(\.name).joined(separator: " + "),
+            calories: items.reduce(0) { $0 + $1.calories },
+            protein: sum(\.protein), carbs: sum(\.carbs), fat: sum(\.fat),
+            saturatedFat: sum(\.saturatedFat), sugars: sum(\.sugars), fiber: sum(\.fiber), salt: sum(\.salt)
+        )
+    }
+
+    static func decodePlan(from json: String) throws -> PlanImportPayload {
+        let data = try data(from: json)
+        guard let plan = try? decoder.decode(PlanImportPayload.self, from: data),
+              plan.name != nil || plan.training?.isEmpty == false || plan.rest?.isEmpty == false || !plan.mealSplit.isEmpty else {
+            throw AIImportError.invalidJSON
+        }
+        return plan
+    }
+
+    static func decodeLabReport(from json: String) throws -> LabReportImportPayload {
+        let data = try data(from: json)
+        guard let payload = try? decoder.decode(LabReportImportPayload.self, from: data), !payload.report.results.isEmpty else {
+            throw AIImportError.invalidJSON
+        }
+        return payload
     }
 
     static func decodeSupplements(from json: String) throws -> [SupplementImportPayload] {
@@ -629,6 +892,117 @@ extension AIJSONImport {
         }
         """
     ) }
+
+    /// A sporadic meal that isn't in the catalog: estimated from a description and photos.
+    static let mealEstimatePrompt = AIImportPrompt(
+        descriptionPlaceholder: "Descrição (ex.: lasanha caseira, uma fatia grande, ~350 g)",
+        task: "Preciso de estimar os valores nutricionais de uma refeição esporádica (uma receita que não faz parte da minha alimentação habitual), para a registar numa app de nutrição. A refeição é a que eu descrever no fim e a das fotos que eu enviar nesta conversa.",
+        fields: """
+        Campos (um único objeto para a refeição toda):
+        - name: nome curto do prato.
+        - description (opcional): descrição breve do prato e dos ingredientes principais que vês ou que eu descrevi.
+        - calories: energia da porção comida, em kcal (número inteiro).
+        - protein, carbs, fat: proteína, hidratos de carbono e lípidos da porção comida, em gramas.
+        - saturatedFat, sugars, fiber, salt (opcionais): lípidos saturados, açúcares, fibra e sal da porção comida, em gramas.
+        Os valores são os da porção que foi realmente comida, não por 100 g. É uma estimativa: usa porções razoáveis quando eu não as indicar.
+        """,
+        template: """
+        {
+          "name": "<nome do prato>",
+          "description": "<descrição e ingredientes principais, opcional>",
+          "calories": <kcal da porção, inteiro>,
+          "protein": <gramas>,
+          "carbs": <gramas>,
+          "fat": <gramas>,
+          "saturatedFat": <gramas>,
+          "sugars": <gramas>,
+          "fiber": <gramas>,
+          "salt": <gramas>
+        }
+        """
+    )
+
+    /// A nutrition plan from the nutritionist's document: pasted text, a PDF or photos.
+    static let planPrompt = AIImportPrompt(
+        descriptionPlaceholder: "Texto do plano (opcional — ou envia o PDF/as fotos)",
+        task: "Preciso de passar um plano nutricional (feito por um nutricionista) para uma app de nutrição. O plano é o do texto que eu colar no fim e/ou o do documento (PDF ou fotos) que eu enviar nesta conversa.",
+        fields: """
+        Campos (um único objeto):
+        - name: nome do plano (ex.: "Plano Outubro 2026").
+        - startsOn, endsOn (opcionais): datas de início e de fim no formato "AAAA-MM-DD", só se o documento as indicar.
+        - priority (opcional): 1 a 5; usa 1 para um plano normal e mais alto só para um plano temporário (ex.: uma prova).
+        - notes (opcional): recomendações gerais do plano, em texto.
+        - training, rest: os objetivos diários de um dia de treino e de um dia de descanso — kcal (inteiro), proteinG, carbsG, fatG (gramas, inteiros) e waterMl (ml). Se o plano só tiver um conjunto de valores, usa-o nos dois.
+        - meals (opcional): a divisão por refeição, { "training": {...}, "rest": {...} }, cada uma com as refeições do plano. As refeições têm exatamente estas chaves: breakfast (pequeno-almoço), morning_snack (meio da manhã), pre_workout (pré-treino), post_workout (pós-treino), lunch (almoço), snack (lanche), dinner (jantar), supper (ceia). Cada refeição: proteinG, carbsG, fatG (gramas, opcionais), notes (sugestões de alimentação, opcional) e startsAt, endsAt (a janela horária, "HH:mm", só se o documento indicar horas).
+        Não inventes valores que o documento não dê; omite o que não existir.
+        """,
+        template: """
+        {
+          "name": "<nome do plano>",
+          "startsOn": "<AAAA-MM-DD, opcional>",
+          "endsOn": "<AAAA-MM-DD, opcional>",
+          "priority": <1 a 5, opcional>,
+          "notes": "<notas gerais, opcional>",
+          "training": { "kcal": <kcal>, "proteinG": <gramas>, "carbsG": <gramas>, "fatG": <gramas>, "waterMl": <ml> },
+          "rest": { "kcal": <kcal>, "proteinG": <gramas>, "carbsG": <gramas>, "fatG": <gramas>, "waterMl": <ml> },
+          "meals": {
+            "training": {
+              "<breakfast | morning_snack | pre_workout | post_workout | lunch | snack | dinner | supper>": {
+                "proteinG": <gramas>,
+                "carbsG": <gramas>,
+                "fatG": <gramas>,
+                "notes": "<sugestões, opcional>",
+                "startsAt": "<HH:mm, opcional>",
+                "endsAt": "<HH:mm, opcional>"
+              }
+            },
+            "rest": { }
+          }
+        }
+        """
+    )
+
+    /// Clinical analyses from the lab's report: photos or a PDF attached in the assistant, or text.
+    static let labReportPrompt = AIImportPrompt(
+        descriptionPlaceholder: "Texto das análises (opcional — ou envia as fotos/o PDF)",
+        task: "Preciso de passar umas análises clínicas para uma app de saúde. As análises são as do texto que eu colar no fim e/ou as do documento (PDF ou fotos) que eu enviar nesta conversa.",
+        fields: """
+        Campos (um único objeto):
+        - title: título das análises (ex.: "Análises de rotina", "Hemograma e perfil lipídico").
+        - date: data da colheita ou do exame, "AAAA-MM-DD".
+        - lab (opcional): nome do laboratório ou da clínica.
+        - notes (opcional): observações do relatório, em texto.
+        - results: uma entrada por análise, na ordem do relatório. Cada uma tem:
+          - name: o nome da análise, em português (ex.: "Colesterol total", "Hemoglobina").
+          - group (opcional): a secção do relatório a que pertence (ex.: "Hemograma", "Perfil lipídico").
+          - value: o valor, como número com ponto decimal, sem unidades. Se o resultado for texto (ex.: "Negativo", "Ausente"), omite value e escreve-o em valueText.
+          - valueText (opcional): o resultado quando não é um número.
+          - unit (opcional): a unidade (ex.: "mg/dL", "g/dL", "10^9/L").
+          - refMin, refMax (opcionais): os limites do intervalo de referência, como números. Para "< 190" usa só refMax 190; para "> 30" usa só refMin 30.
+          - refText (opcional): a referência escrita quando não é um intervalo simples (ex.: "Negativo").
+        Copia só o que o documento diz; não interpretes nem inventes valores nem referências.
+        """,
+        template: """
+        {
+          "title": "<título das análises>",
+          "date": "<AAAA-MM-DD>",
+          "lab": "<laboratório, opcional>",
+          "notes": "<observações, opcional>",
+          "results": [
+            {
+              "name": "<nome da análise>",
+              "group": "<secção, opcional>",
+              "value": <número>,
+              "unit": "<unidade, opcional>",
+              "refMin": <número, opcional>,
+              "refMax": <número, opcional>,
+              "refText": "<referência em texto, opcional>"
+            },
+            { "name": "<outra análise>", "valueText": "<resultado em texto>" }
+          ]
+        }
+        """
+    )
 
     static let diaryPrompt = AIImportPrompt(
         descriptionPlaceholder: "Descrição (ex.: bitoque, comi metade da batata)",

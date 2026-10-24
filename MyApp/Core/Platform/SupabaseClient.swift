@@ -3,7 +3,7 @@ import Observation
 import Security
 
 /// Where the platform's Supabase lives: the `Api` project, locally (`supabase start`) or on the
-/// VPS. Read from `Supabase-Debug.plist` / `Supabase-Release.plist` in the app bundle (git-ignored;
+/// VPS. Read from `Supabase-Debug.plist` / `Supabase-Release.plist` / `Supabase-Staging.plist` in the app bundle (git-ignored;
 /// template in `Config/Supabase.example.plist`), so the app still builds and runs without it —
 /// sync then simply reports itself unavailable.
 ///
@@ -14,7 +14,11 @@ struct SupabaseConfig {
     let publishableKey: String
 
     static let current: SupabaseConfig? = {
-        #if DEBUG
+        // Staging build configuration (scheme "CalorieBuddy Staging", app "IronMan Testes"): the
+        // test API on the VPS, deployed from `develop`.
+        #if STAGING
+        let name = "Supabase-Staging"
+        #elseif DEBUG
         let name = "Supabase-Debug"
         #else
         let name = "Supabase-Release"

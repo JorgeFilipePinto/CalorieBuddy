@@ -56,6 +56,7 @@ enum ChartInteractionMode: String, CaseIterable, Identifiable {
 /// General trends dashboard: pick any combination of weight, calories consumed, calories
 /// burned and water, and see how they've evolved over the last N days.
 struct TrendsView: View {
+    @Environment(PlatformSyncManager.self) private var platform
     @Environment(DataStore.self) private var store
     @Environment(HealthKitManager.self) private var healthKit
     @Environment(\.verticalSizeClass) private var verticalSizeClass
@@ -137,6 +138,7 @@ struct TrendsView: View {
         }
         .refreshable {
             Haptics.light()
+            await platform.refresh()
             await healthKit.refresh(days: fetchDays)
         }
     }

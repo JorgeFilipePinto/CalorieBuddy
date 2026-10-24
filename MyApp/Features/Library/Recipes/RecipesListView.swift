@@ -2,6 +2,7 @@ import SwiftUI
 
 /// Manages saved recipes — groups of catalog foods that can be logged together in one action.
 struct RecipesListView: View {
+    @Environment(PlatformSyncManager.self) private var platform
     @Environment(DataStore.self) private var store
 
     @State private var showingAddRecipe = false
@@ -71,6 +72,7 @@ struct RecipesListView: View {
                 }
                 .refreshable {
                     Haptics.light()
+                    await platform.refresh()
                     store.reloadFromDisk()
                 }
             }

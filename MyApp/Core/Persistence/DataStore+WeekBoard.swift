@@ -48,7 +48,7 @@ extension DataStore {
     }
 
     /// A board meal's target (nutrition plan's split for the kind of day, else the meal plan).
-    func boardMealTarget(day date: Date, meal: MealType, dayType: DayType) -> BoardMealTarget? {
-        WeekBoard.mealTarget(meal: meal, dayType: dayType, plan: nutritionPlan(on: date), mealPlan: mealPlan(on: date))
+    func boardMealTarget(day date: Date, meal: MealType, dayType: DayType, workout: MealTiming.Span? = nil) -> BoardMealTarget? {
+        WeekBoard.mealTarget(meal: meal, dayType: dayType, plan: nutritionPlan(on: date), mealPlan: mealPlan(on: date), workout: workout)
     }
 }

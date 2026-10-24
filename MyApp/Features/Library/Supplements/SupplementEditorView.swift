@@ -47,6 +47,9 @@ struct SupplementEditorView: View {
     @State private var lowStockThresholdText = ""
     @State private var editingStock: StockEditTarget?
     @State private var showingJSONImport = false
+    @State private var usableAsFood = false
+    /// Names of the recipes that stop us from taking this supplement out of the food catalog.
+    @State private var recipesUsingIt: [String] = []
 
     private struct StockEditTarget: Identifiable { let id: UUID }
 
@@ -97,6 +100,16 @@ struct SupplementEditorView: View {
     /// "100 g" / "100 ml" — the reference amount of the "per 100" basis.
     private var per100Label: String {
         unit.baseUnit == .milliliter ? "100 ml" : "100 \(MeasurementUnit.gram.shortLabel)"
+    }
+
+    /// The user switched "Por 100 / Por dose": the label values (and micronutrients) are converted to the new
+    /// basis using the dose size, so the table shows what one dose — or 100 g/ml — holds.
+    private func switchBasis(to new: NutritionBasis) {
+        let old = nutritionBasis
+        nutritionBasis = new
+        guard let factor = NutritionBasisConversion.factor(from: old, to: new, doseSize: computedDoseSize, unit: unit) else { return }
+        labelText.wrappedValue = labelText.wrappedValue.scaled(by: factor)
+        micronutrients = micronutrients.scaled(by: factor)
     }
 
     private var basisDescription: String {
@@ -200,7 +213,7 @@ struct SupplementEditorView: View {
 
                 Section {
                     if unit != .unit {
-                        Picker("Valores indicados", selection: $nutritionBasis) {
+                        Picker("Valores indicados", selection: Binding(get: { nutritionBasis }, set: { switchBasis(to: $0) })) {
                             Text("Por \(per100Label)").tag(NutritionBasis.per100)
                             Text("Por dose").tag(NutritionBasis.perDose)
                         }
@@ -270,6 +283,14 @@ struct SupplementEditorView: View {
                 }
 
                 Section {
+                    Toggle("Pode ser usado como alimento", isOn: $usableAsFood)
+                } header: {
+                    Text("Alimento")
+                } footer: {
+                    Text("Aparece também no catálogo de alimentos, para entrar em receitas (ex.: iogurte com whey). Ao comer, a quantidade sai do stock abaixo. O rótulo edita-se aqui.")
+                }
+
+                Section {
                     ForEach($stocks) { $stock in
                         HStack {
                             Button {
@@ -332,6 +353,11 @@ struct SupplementEditorView: View {
                 }
             }
             .onAppear(perform: populateIfEditing)
+            .alert("Usado em receitas", isPresented: Binding(get: { !recipesUsingIt.isEmpty }, set: { if !$0 { recipesUsingIt = [] } })) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text("Este suplemento é usado como alimento em \(recipesUsingIt.joined(separator: ", ")). Tira-o dessas receitas antes de deixar de o usar como alimento.")
+            }
             .sheet(isPresented: $showingJSONImport) {
                 JSONImportSheet(
                     title: "Importar Suplemento",
@@ -413,6 +439,7 @@ struct SupplementEditorView: View {
         stocks = supplement.stocks
         barcodes = supplement.barcodes
         lowStockThresholdText = supplement.lowStockThreshold.map(formatted) ?? ""
+        usableAsFood = supplement.usableAsFood
     }
 
     /// The first supplement in the AI's answer fills this form (prices and stocks entered here are
@@ -445,6 +472,14 @@ struct SupplementEditorView: View {
 
     private func save() {
         guard let categoryID, let totalSize, let doseSize = computedDoseSize else { return }
+        // Taking it out of the catalog would pull it out of recipes: not while one uses it.
+        if let supplementToEdit, supplementToEdit.usableAsFood, !usableAsFood {
+            let recipes = store.recipes(usingMirrorOf: supplementToEdit)
+            if !recipes.isEmpty {
+                recipesUsingIt = recipes.map(\.name)
+                return
+            }
+        }
         var supplement = Supplement(
             id: supplementToEdit?.id ?? UUID(),
             name: name.trimmingCharacters(in: .whitespaces),
@@ -465,6 +500,7 @@ struct SupplementEditorView: View {
             barcodes: barcodes
         )
         supplement.labelPhotoIDs = labelPhotoIDs
+        supplement.usableAsFood = usableAsFood
         supplement.nutritionBasis = unit == .unit ? .perDose : nutritionBasis
         supplement.saturatedFat = LabelNutritionText.number(saturatedFatText)
         supplement.sugars = LabelNutritionText.number(sugarsText)

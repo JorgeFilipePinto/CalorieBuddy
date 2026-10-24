@@ -100,6 +100,7 @@ final class PlatformSyncManager {
                                                     replacingServerBackup: replacingServerBackup)
             state.save()
             let photos = try await pushPhotos(database, state: &state)
+            try await pushExamFiles(database, state: &state)
             let health = try await pushHealth(healthKit, state: &state)
             try await flushEvents()
 
@@ -145,6 +146,22 @@ final class PlatformSyncManager {
         defer { UIApplication.shared.endBackgroundTask(taskID) }
         #endif
         try? await sync(store: store, healthKit: healthKit, automatic: true)
+    }
+
+    private weak var connectedStore: DataStore?
+    private weak var connectedHealthKit: HealthKitManager?
+
+    /// Lets screens refresh without carrying the store and HealthKit around (set in `MyApp`).
+    func connect(store: DataStore, healthKit: HealthKitManager) {
+        connectedStore = store
+        connectedHealthKit = healthKit
+    }
+
+    /// Pull-to-refresh: syncs with the platform too, so what changed on the dashboard (or was not
+    /// sent yet) is up to date. Silent when signed out or offline; errors stay in the sync screen.
+    func refresh() async {
+        guard let connectedStore, let connectedHealthKit else { return }
+        await autoSyncIfEnabled(store: connectedStore, healthKit: connectedHealthKit)
     }
 
     /// How long after the last local change the sync starts, so a burst of edits (a recipe logged
@@ -257,9 +274,21 @@ final class PlatformSyncManager {
             case AppCollection.progressPhotos:
                 let rows = collection.documents.compactMap { $0.value as? ProgressPhoto }.map(Self.progressPhotoRow)
                 for batch in rows.chunked(into: Self.batchSize) { try await client.upsert("progress_photos", rows: batch, onConflict: "id") }
+            case AppCollection.bodyMeasurements:
+                let rows = collection.documents.compactMap { $0.value as? BodyMeasurement }.map(Self.bodyMeasurementRow)
+                for batch in rows.chunked(into: Self.batchSize) { try await client.upsert("body_measurements", rows: batch, onConflict: "id") }
+            case AppCollection.labReports:
+                let rows = collection.documents.compactMap { $0.value as? LabReport }.map(Self.labReportRow)
+                for batch in rows.chunked(into: Self.batchSize) { try await client.upsert("lab_reports", rows: batch, onConflict: "id") }
+            case AppCollection.otherExams:
+                let rows = collection.documents.compactMap { $0.value as? OtherExam }.map(Self.otherExamRow)
+                for batch in rows.chunked(into: Self.batchSize) { try await client.upsert("other_exams", rows: batch, onConflict: "id") }
             case AppCollection.supplements:
                 let rows = collection.documents.compactMap { $0.value as? Supplement }.map { Self.supplementRow($0, in: database) }
                 for batch in rows.chunked(into: Self.batchSize) { try await client.upsert("supplements", rows: batch, onConflict: "id") }
+            case AppCollection.supplementLogs:
+                let rows = collection.documents.compactMap { $0.value as? SupplementLogEntry }.map { Self.supplementIntakeRow($0, in: database) }
+                for batch in rows.chunked(into: Self.batchSize) { try await client.upsert("supplement_intakes", rows: batch, onConflict: "id") }
             case _ where Self.pantryTables[collection.name] != nil:
                 let rows = collection.documents.compactMap { Self.pantryRow($0.value, foods: database.foodItems) }
                 for batch in rows.chunked(into: Self.batchSize) {
@@ -276,6 +305,7 @@ final class PlatformSyncManager {
             }
         }
         _ = try await pushPhotos(database, state: &state)
+        try await pushExamFiles(database, state: &state)
         state.save()
     }
 
@@ -334,7 +364,12 @@ final class PlatformSyncManager {
                 cookingYields: try decode(AppCollection.cookingYields, as: CookingYield.self),
                 mealPreps: try decode(AppCollection.mealPreps, as: MealPrep.self),
                 mealBoardPlacements: try decode(AppCollection.mealBoardPlacements, as: MealBoardPlacement.self),
-                mealBoardDays: try decode(AppCollection.mealBoardDays, as: MealBoardDay.self)
+                mealBoardDays: try decode(AppCollection.mealBoardDays, as: MealBoardDay.self),
+                consultationQuestions: try decode(AppCollection.consultationQuestions, as: ConsultationQuestion.self),
+                labReports: try decode(AppCollection.labReports, as: LabReport.self),
+                otherExams: try decode(AppCollection.otherExams, as: OtherExam.self),
+                workoutSupplementAnswers: try decode(AppCollection.workoutSupplementAnswers, as: WorkoutSupplementAnswer.self),
+                reminders: try decode(AppCollection.reminders, as: Reminder.self)
             )
 
             // The images, before switching databases, so the restored records show their photos
@@ -450,7 +485,7 @@ final class PlatformSyncManager {
     private func fetchRemotePlans() async throws -> [RemotePlan] {
         try await client.select(
             "nutrition_plans", as: RemotePlan.self,
-            select: "id,name,starts_on,ends_on,priority,notes,created_at,updated_at,deleted_at,nutrition_targets(day_type,kcal,protein_g,carbs_g,fat_g,water_ml),nutrition_plan_meals(day_type,meal,protein_g,carbs_g,fat_g,notes)",
+            select: "id,name,starts_on,ends_on,priority,notes,created_at,updated_at,deleted_at,nutrition_targets(day_type,kcal,protein_g,carbs_g,fat_g,water_ml),nutrition_plan_meals(day_type,meal,protein_g,carbs_g,fat_g,notes,starts_at,ends_at)",
             order: "starts_on,id"
         )
     }
@@ -472,6 +507,7 @@ final class PlatformSyncManager {
                 if let carbs = targets.carbsG { row["carbs_g"] = carbs }
                 if let fat = targets.fatG { row["fat_g"] = fat }
                 if let notes = targets.notes, !notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { row["notes"] = notes }
+                if targets.hasWindow, let start = targets.startsAt, let end = targets.endsAt { row["starts_at"] = start; row["ends_at"] = end }
                 return row
             }
         }
@@ -588,6 +624,11 @@ final class PlatformSyncManager {
         case AppCollection.mealPreps: try merge(&database.mealPreps, MealPrep.self)
         case AppCollection.mealBoardPlacements: try merge(&database.mealBoardPlacements, MealBoardPlacement.self)
         case AppCollection.mealBoardDays: try merge(&database.mealBoardDays, MealBoardDay.self)
+        case AppCollection.consultationQuestions: try merge(&database.consultationQuestions, ConsultationQuestion.self)
+        case AppCollection.labReports: try merge(&database.labReports, LabReport.self)
+        case AppCollection.otherExams: try merge(&database.otherExams, OtherExam.self)
+        case AppCollection.workoutSupplementAnswers: try merge(&database.workoutSupplementAnswers, WorkoutSupplementAnswer.self)
+        case AppCollection.reminders: try merge(&database.reminders, Reminder.self)
         case AppCollection.settings:
             // One document; it can't be deleted, only replaced.
             guard let data else { return }
@@ -675,12 +716,36 @@ final class PlatformSyncManager {
                     try await client.upsert("progress_photos", rows: batch, onConflict: "id")
                 }
                 try await softDelete("progress_photos", ids: deleted)
+            case AppCollection.bodyMeasurements:
+                let rows = typed.compactMap { $0.value as? BodyMeasurement }.map(Self.bodyMeasurementRow)
+                for batch in rows.chunked(into: Self.batchSize) {
+                    try await client.upsert("body_measurements", rows: batch, onConflict: "id")
+                }
+                try await softDelete("body_measurements", ids: deleted)
+            case AppCollection.labReports:
+                let rows = typed.compactMap { $0.value as? LabReport }.map(Self.labReportRow)
+                for batch in rows.chunked(into: Self.batchSize) {
+                    try await client.upsert("lab_reports", rows: batch, onConflict: "id")
+                }
+                try await softDelete("lab_reports", ids: deleted)
+            case AppCollection.otherExams:
+                let rows = typed.compactMap { $0.value as? OtherExam }.map(Self.otherExamRow)
+                for batch in rows.chunked(into: Self.batchSize) {
+                    try await client.upsert("other_exams", rows: batch, onConflict: "id")
+                }
+                try await softDelete("other_exams", ids: deleted)
             case AppCollection.supplements:
                 let rows = typed.compactMap { $0.value as? Supplement }.map { Self.supplementRow($0, in: database) }
                 for batch in rows.chunked(into: Self.batchSize) {
                     try await client.upsert("supplements", rows: batch, onConflict: "id")
                 }
                 try await softDelete("supplements", ids: deleted)
+            case AppCollection.supplementLogs:
+                let rows = typed.compactMap { $0.value as? SupplementLogEntry }.map { Self.supplementIntakeRow($0, in: database) }
+                for batch in rows.chunked(into: Self.batchSize) {
+                    try await client.upsert("supplement_intakes", rows: batch, onConflict: "id")
+                }
+                try await softDelete("supplement_intakes", ids: deleted)
             case _ where Self.pantryTables[collection.name] != nil:
                 let table = Self.pantryTables[collection.name]!
                 let rows = typed.compactMap { Self.pantryRow($0.value, foods: database.foodItems) }
@@ -731,6 +796,8 @@ final class PlatformSyncManager {
         add("recipe", database.recipes.map(\.photoID))
         add("supplement", database.supplements.map(\.photoID))
         add("progress", database.progressPhotos.map(\.photoID))
+        // A sporadic meal's photo goes in the food folder (readable with the nutrition category).
+        add("food", database.entries.map(\.photoID))
         // Nutrition-label photos go in the same folder as their record's photo, so the dashboard
         // shows them to exactly the same people.
         add("food", database.foodItems.flatMap(\.labelPhotoIDs))
@@ -825,6 +892,8 @@ final class PlatformSyncManager {
             "group_id": entry.groupID?.uuidString ?? NSNull(),
             "recipe_id": entry.recipeID?.uuidString ?? NSNull(),
             "group_name": entry.groupName ?? NSNull(),
+            "description": entry.notes.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : String($0.prefix(2000)) } ?? NSNull(),
+            "photo_path": entry.photoID.map { photoPath("food", $0) } ?? NSNull(),
             "source": "ios_app",
             "deleted_at": NSNull()
         ]
@@ -1009,6 +1078,114 @@ final class PlatformSyncManager {
         ]
     }
 
+    /// A supplement intake as the dashboard's `supplement_intakes` row: the name and the nutrition of the
+    /// doses are copied, so the history reads the same if the supplement is edited or removed later.
+    private static func supplementIntakeRow(_ log: SupplementLogEntry, in database: AppDatabase) -> [String: Any] {
+        let supplement = database.supplements.first { $0.id == log.supplementID }
+        let nutrition = supplement?.nutrition(quantity: log.quantity)
+        func amount(_ value: Double?) -> Any { value.map { clamp($0, max: 100_000) } ?? NSNull() }
+        let notes = log.notes?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = supplement?.name.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return [
+            "id": log.id.uuidString,
+            "supplement_id": log.supplementID.uuidString,
+            "supplement_name": String((name.isEmpty ? "Suplemento" : name).prefix(160)),
+            "taken_at": SupabaseClient.timestamp(log.date),
+            "quantity": max((log.quantity * 1000).rounded() / 1000, 0.001),
+            "stock_id": log.stockID?.uuidString ?? NSNull(),
+            "notes": notes.flatMap { $0.isEmpty ? nil : String($0.prefix(1000)) } ?? NSNull(),
+            "workout_key": log.workoutKey ?? NSNull(),
+            "kcal": amount(nutrition?.calories),
+            "protein_g": amount(nutrition?.protein),
+            "carbs_g": amount(nutrition?.carbs),
+            "fat_g": amount(nutrition?.fat),
+            "source": "ios_app",
+            "deleted_at": NSNull()
+        ]
+    }
+
+    /// A body measurement as the dashboard's `body_measurements` row (metric = `BodyMetric.rawValue`).
+    private static func bodyMeasurementRow(_ measurement: BodyMeasurement) -> [String: Any] {
+        [
+            "id": measurement.id.uuidString,
+            "metric": measurement.metric.rawValue,
+            "value": clamp(measurement.value, max: 100_000),
+            "measured_at": SupabaseClient.timestamp(measurement.date),
+            "source": "ios_app",
+            "deleted_at": NSNull()
+        ]
+    }
+
+    /// A clinical analysis as the dashboard's `lab_reports` row (results and files as jsonb).
+    private static func labReportRow(_ report: LabReport) -> [String: Any] {
+        func text(_ value: String?, _ max: Int) -> Any {
+            value.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.flatMap { $0.isEmpty ? nil : String($0.prefix(max)) } ?? NSNull()
+        }
+        return [
+            "id": report.id.uuidString,
+            "title": String(report.title.trimmingCharacters(in: .whitespacesAndNewlines).prefix(160)),
+            "performed_on": report.performedOn,
+            "lab": text(report.lab, 160),
+            "notes": text(report.notes, 4000),
+            "results": (try? jsonObject(report.results)) ?? [],
+            "files": (try? jsonObject(report.files)) ?? [],
+            "source": "ios_app",
+            "deleted_at": NSNull()
+        ]
+    }
+
+    private static func otherExamRow(_ exam: OtherExam) -> [String: Any] {
+        func text(_ value: String?, _ max: Int) -> Any {
+            value.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.flatMap { $0.isEmpty ? nil : String($0.prefix(max)) } ?? NSNull()
+        }
+        return [
+            "id": exam.id.uuidString,
+            "title": String(exam.title.trimmingCharacters(in: .whitespacesAndNewlines).prefix(160)),
+            "requested_on": exam.requestedOn ?? NSNull(),
+            "viewed_on": exam.viewedOn ?? NSNull(),
+            "notes": text(exam.notes, 4000),
+            "files": (try? jsonObject(exam.files)) ?? [],
+            "source": "ios_app",
+            "deleted_at": NSNull()
+        ]
+    }
+
+    // MARK: Exam documents
+
+    static let examBucket = "athlete-exams"
+
+    /// Uploads the documents the bucket doesn't have yet and removes the ones no exam refers to any
+    /// more. A document made on the dashboard has no local copy: it is already in the bucket.
+    private func pushExamFiles(_ database: AppDatabase, state: inout PlatformSyncState) async throws {
+        let wanted = Set((database.labReports.flatMap(\.files) + database.otherExams.flatMap(\.files)).map(\.path))
+        var known = Set(state.examFilePaths ?? [])
+        for path in wanted.sorted() where !known.contains(path) {
+            if let data = ExamFileStore.data(path) {
+                let type = path.lowercased().hasSuffix(".pdf") ? "application/pdf" : "image/jpeg"
+                try await client.uploadObject(Self.examBucket, path: path, data: data, contentType: type)
+            }
+            known.insert(path)
+            state.examFilePaths = Array(known)
+            state.save()
+        }
+        let stale = known.subtracting(wanted).sorted()
+        for batch in stale.chunked(into: Self.idsPerFilter) {
+            try await client.deleteObjects(Self.examBucket, paths: batch)
+            known.subtract(batch)
+            state.examFilePaths = Array(known)
+            state.save()
+        }
+    }
+
+    /// The document on this iPhone, downloaded first when it was made elsewhere (the dashboard).
+    func localURL(forExamFile file: ExamFile) async throws -> URL {
+        if ExamFileStore.exists(file.path) { return ExamFileStore.localURL(for: file.path) }
+        guard client.isSignedIn else { throw SupabaseError.notSignedIn }
+        let data = try await client.downloadObject(Self.examBucket, path: file.path)
+        guard ExamFileStore.write(data, path: file.path) else { throw SupabaseError.invalidResponse }
+        return ExamFileStore.localURL(for: file.path)
+    }
+
     // MARK: Apple Health (up)
 
     private func pushHealth(_ healthKit: HealthKitManager,
@@ -1135,6 +1312,8 @@ private struct RemotePlan: Decodable {
         let carbs_g: Double?
         let fat_g: Double?
         let notes: String?
+        let starts_at: String?
+        let ends_at: String?
     }
 
     /// As the app models it (`nil` if incomplete — the database always saves both targets).
@@ -1152,7 +1331,8 @@ private struct RemotePlan: Decodable {
             training: training.targets,
             rest: rest.targets,
             meals: (nutrition_plan_meals ?? []).reduce(into: [:]) { meals, row in
-                let targets = PlanMealTargets(proteinG: row.protein_g, carbsG: row.carbs_g, fatG: row.fat_g, notes: row.notes)
+                let targets = PlanMealTargets(proteinG: row.protein_g, carbsG: row.carbs_g, fatG: row.fat_g, notes: row.notes,
+                                              startsAt: row.starts_at.map { String($0.prefix(5)) }, endsAt: row.ends_at.map { String($0.prefix(5)) })
                 guard !targets.isEmpty else { return }
                 meals[row.day_type, default: [:]][row.meal] = targets
             },
@@ -1187,6 +1367,14 @@ private struct AppCollection {
     /// The week board (no typed tables: app_documents only, athlete-only like every document).
     static let mealBoardPlacements = "mealBoardPlacements"
     static let mealBoardDays = "mealBoardDays"
+    /// Questions for the appointment (app_documents only, athlete-only).
+    static let consultationQuestions = "consultationQuestions"
+    /// Exams (typed rows `lab_reports` / `other_exams`, athlete-only; documents in the athlete-exams bucket).
+    static let labReports = "labReports"
+    static let otherExams = "otherExams"
+    /// com / sem suplementação per workout (app_documents only, athlete-only).
+    static let workoutSupplementAnswers = "workoutSupplementAnswers"
+    static let reminders = "reminders"
 
     let name: String
     let documents: [(id: String, value: any Encodable)]
@@ -1226,6 +1414,11 @@ private struct AppCollection {
             AppCollection(mealPreps, database.mealPreps),
             AppCollection(mealBoardPlacements, database.mealBoardPlacements),
             AppCollection(mealBoardDays, database.mealBoardDays),
+            AppCollection(consultationQuestions, database.consultationQuestions),
+            AppCollection(labReports, database.labReports),
+            AppCollection(otherExams, database.otherExams),
+            AppCollection(workoutSupplementAnswers, database.workoutSupplementAnswers),
+            AppCollection(reminders, database.reminders),
             AppCollection(name: settings, documents: [("current", database.settings)])
         ]
     }
@@ -1244,6 +1437,8 @@ private struct PlatformSyncState: Codable {
     // would look like a first sync).
     /// Photo paths already in the bucket.
     var uploadedPhotoPaths: [String]?
+    /// Exam documents already in the bucket (uploaded from here, or known to be there).
+    var examFilePaths: [String]?
     /// Version of the typed-row mapping last sent (see `currentTypedRowsVersion`).
     var typedRowsVersion: Int?
 
@@ -1254,7 +1449,8 @@ private struct PlatformSyncState: Codable {
     /// 4: recipes and the food details (food_details_recipes). 5: the food stock and meal prep,
     /// food_items.cooking_weight_change (pantry_meal_prep).
     /// 6: food subcategories and preparations (base_food_id, preparation), cooking_yields.method.
-    static let currentTypedRowsVersion = 6
+    /// 7: body measurements (body_measurements). 8: exams (lab_reports, other_exams).
+    static let currentTypedRowsVersion = 9
 
     /// One file per server: a Debug build (local Supabase) and a Release build (the VPS) on the
     /// same iPhone must not share what they think was already sent.

@@ -25,6 +25,10 @@ extension BodyMetric {
         case .muscleMass: return .purple
         case .leanMass: return .indigo
         case .visceralFat: return .red
+        case .bodyWater: return .cyan
+        case .boneMass: return .brown
+        case .basalMetabolicRate: return .pink
+        case .metabolicAge: return .mint
         default: return .blue
         }
     }
@@ -34,8 +38,40 @@ extension BodyMetric {
 
     /// "24,5 %", "38,2 kg", "9", "84,0 cm".
     func formatted(_ value: Double) -> String {
-        let number = value.formatted(.number.precision(.fractionLength(self == .visceralFat ? 0 : 1)))
+        let whole = self == .visceralFat || self == .basalMetabolicRate || self == .metabolicAge
+        let number = value.formatted(.number.precision(.fractionLength(whole ? 0 : 1)))
         return unitLabel.isEmpty ? number : "\(number) \(unitLabel)"
+    }
+}
+
+/// The unit a bioimpedance value is typed in: the scale or the assessment may give it in kg or as
+/// a percentage of the body weight.
+enum BodyInputUnit: String, CaseIterable, Identifiable {
+    case kilograms, percent
+
+    var id: String { rawValue }
+    var label: String { self == .kilograms ? "kg" : "%" }
+}
+
+extension BodyMetric {
+    /// Whether the value may be typed in kg or in % of the body weight.
+    var acceptsKgOrPercent: Bool {
+        switch self {
+        case .bodyFat, .bodyWater, .muscleMass, .leanMass, .boneMass: return true
+        default: return false
+        }
+    }
+
+    /// The unit the metric is kept in (and charted in): % for body fat and water, kg for the masses.
+    var storedUnit: BodyInputUnit { self == .bodyFat || self == .bodyWater ? .percent : .kilograms }
+
+    /// `value` typed in `unit`, as the unit the metric is kept in, using the body weight to go
+    /// between kg and %: kg = % × weight ÷ 100 and % = kg ÷ weight × 100. `nil` when the weight is
+    /// needed and unknown.
+    func stored(_ value: Double, typedIn unit: BodyInputUnit, weightKG: Double?) -> Double? {
+        guard acceptsKgOrPercent, unit != storedUnit else { return value }
+        guard let weightKG, weightKG > 0 else { return nil }
+        return storedUnit == .kilograms ? value * weightKG / 100 : value / weightKG * 100
     }
 }
 
@@ -324,30 +360,56 @@ struct BodyMeasurementLogCard: View {
 
 /// One form for a whole measuring session: every field is optional, only the filled ones are saved.
 struct LogBodyMeasurementsView: View {
+    /// "Iniciar Consulta": the same fields with the questions saved for the appointment on top.
+    var asConsultation = false
+
     @Environment(DataStore.self) private var store
     @Environment(HealthKitManager.self) private var healthKit
     @Environment(\.dismiss) private var dismiss
     @State private var isSaving = false
 
     @State private var date = Date()
+    @State private var weightText = ""
+    /// What was answered to each pending question during the appointment.
+    @State private var answers: [UUID: String] = [:]
     @State private var texts: [BodyMetric: String] = [:]
+    /// kg or % for the metrics that take both (default: the unit each is kept in).
+    @State private var units: [BodyMetric: BodyInputUnit] = [:]
     @State private var guideMetric: BodyMetric?
     @State private var errorMessage: String?
+
+    private func unit(for metric: BodyMetric) -> BodyInputUnit { units[metric] ?? metric.storedUnit }
+
+    /// The weight kg ↔ % goes through: the one typed here, else Health's latest reading up to this date.
+    private var referenceWeight: Double? {
+        weight ?? healthKit.weightHistory.first { $0.date <= date }?.value ?? healthKit.latestWeightKG
+    }
 
     private func value(for metric: BodyMetric) -> Double? {
         guard let text = texts[metric]?.trimmingCharacters(in: .whitespaces), !text.isEmpty else { return nil }
         return Double(text.replacingOccurrences(of: ",", with: "."))
     }
 
-    private var hasAnyValue: Bool { BodyMetric.allCases.contains { value(for: $0) != nil } }
+    private var weight: Double? {
+        let text = weightText.trimmingCharacters(in: .whitespaces)
+        return text.isEmpty ? nil : Double(text.replacingOccurrences(of: ",", with: "."))
+    }
+
+    private var hasAnswers: Bool { answers.values.contains { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } }
+
+    private var hasAnyValue: Bool { weight != nil || hasAnswers || BodyMetric.allCases.contains { value(for: $0) != nil } }
 
     var body: some View {
         NavigationStack {
             Form {
+                if asConsultation { questionsSection }
                 Section {
-                    DatePicker("Data", selection: $date, in: ...Date(), displayedComponents: .date)
+                    DatePicker("Data e hora", selection: $date, in: ...Date())
+                } footer: {
+                    Text("Preenche o que mediste na consulta (ou na balança); tudo é opcional. Ao guardar, cada valor vai para o sítio certo: o peso, a massa gorda, a massa magra e a cintura para a app Saúde, o resto para a app, e tudo para o dashboard.")
                 }
-                Section("Composição (balança)") {
+                Section("Peso e bioimpedância") {
+                    weightField
                     ForEach(BodyMetric.composition) { field(for: $0) }
                 }
                 Section {
@@ -358,7 +420,7 @@ struct LogBodyMeasurementsView: View {
                     Text("Toca no ícone de cada medida para veres como a medir. Deixa em branco o que não mediste. A massa gorda, a massa magra e a cintura são guardadas na app Saúde.")
                 }
             }
-            .navigationTitle("Registar Medidas")
+            .navigationTitle(asConsultation ? "Consulta" : "Registar Medidas")
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
@@ -394,7 +456,52 @@ struct LogBodyMeasurementsView: View {
         }
     }
 
+    /// The questions saved for this appointment, each with room for the answer.
+    private var questionsSection: some View {
+        Section {
+            let pending = store.pendingConsultationQuestions
+            if pending.isEmpty {
+                Text("Sem perguntas guardadas. Podes escrevê-las antes, em Perguntas para a Consulta.")
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(pending) { question in
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(question.text).font(.headline)
+                    TextField("Resposta", text: Binding(get: { answers[question.id] ?? "" }, set: { answers[question.id] = $0 }), axis: .vertical)
+                        .lineLimit(1...6)
+                }
+                .padding(.vertical, 2)
+            }
+        } header: {
+            Text("Perguntas")
+        } footer: {
+            Text("As que responderes ficam guardadas com a resposta; as outras continuam por fazer.")
+        }
+    }
+
+    private var weightField: some View {
+        HStack {
+            Image(systemName: "scalemass.fill")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 26, height: 26)
+                .background(.teal, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            Text("Peso")
+            Spacer()
+            TextField("—", text: $weightText)
+                #if os(iOS)
+                .keyboardType(.decimalPad)
+                #endif
+                .multilineTextAlignment(.trailing)
+                .frame(width: 80)
+            Text("kg")
+                .foregroundStyle(.secondary)
+                .frame(width: 26, alignment: .leading)
+        }
+    }
+
     private func field(for metric: BodyMetric) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
         HStack {
             Button {
                 guideMetric = metric
@@ -416,16 +523,47 @@ struct LogBodyMeasurementsView: View {
                 #endif
                 .multilineTextAlignment(.trailing)
                 .frame(width: 80)
-            Text(metric.unitLabel)
-                .foregroundStyle(.secondary)
-                .frame(width: 26, alignment: .leading)
+            if metric.acceptsKgOrPercent {
+                Picker("Unidade", selection: Binding(get: { unit(for: metric) }, set: { units[metric] = $0 })) {
+                    ForEach(BodyInputUnit.allCases) { Text($0.label).tag($0) }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .fixedSize()
+            } else {
+                Text(metric.unitLabel)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 26, alignment: .leading)
+            }
+        }
+        if metric.acceptsKgOrPercent, unit(for: metric) != metric.storedUnit, let typed = value(for: metric) {
+            // What the typed value comes to in the unit it is kept in.
+            if let stored = metric.stored(typed, typedIn: unit(for: metric), weightKG: referenceWeight), let weight = referenceWeight {
+                Text("= \(metric.formatted(stored)) com \(weight.formatted(.number.precision(.fractionLength(1)))) kg de peso")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Para converter de \(unit(for: metric).label) preciso do peso: preenche-o acima.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+        }
         }
     }
 
     private func save() {
+        if let weight, !(30...300).contains(weight) {
+            errorMessage = "Peso: \(weight.formatted()) kg parece um engano (esperado entre 30 e 300 kg)."
+            return
+        }
         var values: [(BodyMetric, Double)] = []
         for metric in BodyMetric.allCases {
-            guard let value = value(for: metric) else { continue }
+            guard let typed = value(for: metric) else { continue }
+            // Typed in kg or % of the body weight: kept in the metric's own unit.
+            guard let value = metric.stored(typed, typedIn: unit(for: metric), weightKG: referenceWeight) else {
+                errorMessage = "\(metric.displayName): para converter de \(unit(for: metric).label) preciso do peso. Preenche o peso (ou regista-o na app Saúde)."
+                return
+            }
             guard metric.validRange.contains(value) else {
                 errorMessage = "\(metric.displayName): \(metric.formatted(value)) parece um engano (esperado entre \(metric.formatted(metric.validRange.lowerBound)) e \(metric.formatted(metric.validRange.upperBound)))."
                 return
@@ -435,6 +573,8 @@ struct LogBodyMeasurementsView: View {
         isSaving = true
         Task {
             var local: [BodyMeasurement] = []
+            var weightFailed = false
+            if let weight, await !healthKit.logWeight(kilograms: weight, date: date) { weightFailed = true }
             for (metric, value) in values {
                 // Health's metrics go to Health (and nowhere else, or they'd show up twice); if
                 // that fails — no permission, no Health on this device — the app keeps them.
@@ -447,7 +587,21 @@ struct LogBodyMeasurementsView: View {
             if values.contains(where: { $0.0.isHealthKitWritable }) {
                 await healthKit.refresh(days: 365)
             }
+            // The questions answered here are kept with their answer; the rest stay pending.
+            for question in store.pendingConsultationQuestions {
+                let answer = (answers[question.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !answer.isEmpty else { continue }
+                var updated = question
+                updated.answer = String(answer.prefix(2000))
+                updated.answeredAt = date
+                store.updateConsultationQuestion(updated)
+            }
             isSaving = false
+            if weightFailed {
+                // Everything else was saved; the weight needs Health access.
+                errorMessage = "O peso não foi guardado: a app não tem acesso de escrita ao peso na app Saúde. O resto foi registado."
+                return
+            }
             dismiss()
         }
     }

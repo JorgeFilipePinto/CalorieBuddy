@@ -12,7 +12,14 @@ struct RecipeEditorView: View {
     @State private var photoID: UUID?
     @State private var labelPhotoIDs: [UUID] = []
     @State private var items: [RecipeItem] = []
-    @State private var showingAddComponent = false
+    @State private var searchText = ""
+    @State private var showingNewFoodItem = false
+    /// Barcode to prefill the new food with (scanned but not in the catalog).
+    @State private var newFoodBarcode: String?
+    @State private var showingScanner = false
+    /// What the scanner read, handled once its sheet is gone (an alert can't show over it).
+    @State private var scannedCode: String?
+    @State private var unknownBarcode: String?
     @State private var showingJSONImport = false
     @State private var editingItem: RecipeItem?
 
@@ -57,51 +64,64 @@ struct RecipeEditorView: View {
                 }
 
                 Section {
-                    ForEach(items) { item in
-                        if let food = store.foodItems.first(where: { $0.id == item.foodItemID }) {
-                            Button {
-                                editingItem = item
-                            } label: {
+                    TextField("Procurar alimentos", text: $searchText)
+                        #if os(iOS)
+                        .textInputAutocapitalization(.never)
+                        #endif
+                        .autocorrectionDisabled()
+                    if !searchText.trimmingCharacters(in: .whitespaces).isEmpty {
+                        let matches = Array(store.foodItems.filteredAndSorted(searchText: searchText, order: .name).prefix(30))
+                        if matches.isEmpty {
+                            Text("Nenhum alimento corresponde.").foregroundStyle(.secondary)
+                        }
+                        ForEach(matches) { food in
+                            Button { toggle(food) } label: {
                                 HStack {
-                                    VStack(alignment: .leading) {
-                                        Text(food.name)
-                                            .foregroundStyle(.primary)
-                                        HStack(spacing: 4) {
-                                            Text(RecipeIngredientEditorView.amountLabel(food: food, quantity: item.quantity))
-                                            if let itemCost = store.cost(for: food, quantity: item.quantity) {
-                                                Text("· \(itemCost.formatted(.currency(code: currencyCode)))")
-                                            }
-                                        }
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                    }
+                                    Text(food.name).foregroundStyle(.primary)
                                     Spacer()
-                                    Text("\(food.scaledCalories(quantity: item.quantity)) kcal")
-                                        .foregroundStyle(.secondary)
-                                    Image(systemName: "chevron.right")
-                                        .font(.caption)
-                                        .foregroundStyle(.tertiary)
+                                    Image(systemName: isSelected(food) ? "checkmark.circle.fill" : "circle")
+                                        .foregroundStyle(isSelected(food) ? Color.accentColor : .secondary)
                                 }
                             }
                             .tint(.primary)
                         }
                     }
-                    .onDelete { offsets in items.remove(atOffsets: offsets) }
-
-                    Button {
-                        showingAddComponent = true
-                    } label: {
-                        Label("Adicionar Alimentos", systemImage: "plus")
+                    #if canImport(UIKit)
+                    Button { showingScanner = true } label: {
+                        Label("Digitalizar Código de Barras", systemImage: "barcode.viewfinder")
                     }
-                    .disabled(store.foodItems.isEmpty)
+                    #endif
+                    Button {
+                        newFoodBarcode = nil
+                        showingNewFoodItem = true
+                    } label: {
+                        Label("Criar Novo Alimento", systemImage: "plus.circle")
+                    }
                 } header: {
-                    Text("Ingredientes · Quantidades por Omissão")
+                    Text("Ingredientes")
                 } footer: {
-                    if store.foodItems.isEmpty {
-                        Text("Cria primeiro alimentos no catálogo.")
-                    } else if !items.isEmpty {
+                    Text(store.foodItems.isEmpty ? "Cria primeiro alimentos no catálogo."
+                         : "Procura e marca todos os alimentos da receita; aparecem abaixo para acertares as quantidades.")
+                }
+
+                Section {
+                    if items.isEmpty {
+                        Text("Ainda sem alimentos.").foregroundStyle(.secondary)
+                    }
+                    ForEach($items) { $item in
+                        if let food = store.foodItems.first(where: { $0.id == item.foodItemID }) {
+                            IngredientAmountRow(food: food, quantity: $item.quantity,
+                                                cost: store.cost(for: food, quantity: item.quantity).map { $0.formatted(.currency(code: currencyCode)) },
+                                                onOpen: { editingItem = item })
+                        }
+                    }
+                    .onDelete { offsets in items.remove(atOffsets: offsets) }
+                } header: {
+                    Text("Selecionados · Quantidades por Omissão")
+                } footer: {
+                    if !items.isEmpty {
                         Text("Total: \(totalCalories) kcal" + (totalCost > 0 ? " · \(totalCost.formatted(.currency(code: currencyCode)))" : "")
-                             + ". Ao registar no diário escolhes quanto comeste de cada ingrediente; estas quantidades são só o ponto de partida.")
+                             + ". Desliza para remover. Ao registar no diário escolhes quanto comeste de cada ingrediente; estas quantidades são só o ponto de partida.")
                     }
                 }
 
@@ -140,10 +160,28 @@ struct RecipeEditorView: View {
                     }
                 }
             }
-            .sheet(isPresented: $showingAddComponent) {
-                RecipeComponentPickerView(existingFoodIDs: Set(items.map(\.foodItemID))) { foodItemID, quantity in
-                    items.append(RecipeItem(foodItemID: foodItemID, quantity: quantity))
+            .sheet(isPresented: $showingNewFoodItem) {
+                FoodItemEditorView(initialBarcode: newFoodBarcode) { newItem in
+                    if !items.contains(where: { $0.foodItemID == newItem.id }) {
+                        items.append(RecipeItem(foodItemID: newItem.id, quantity: 1))
+                    }
                 }
+            }
+            .sheet(isPresented: $showingScanner, onDismiss: handleScannedCode) {
+                BarcodeScannerView { code in scannedCode = code }
+            }
+            .alert("Alimento Não Encontrado", isPresented: Binding(
+                get: { unknownBarcode != nil },
+                set: { if !$0 { unknownBarcode = nil } }
+            )) {
+                Button("Criar Manualmente") {
+                    newFoodBarcode = unknownBarcode
+                    unknownBarcode = nil
+                    showingNewFoodItem = true
+                }
+                Button("Cancelar", role: .cancel) { unknownBarcode = nil }
+            } message: {
+                Text("O código \(unknownBarcode ?? "") não está em nenhum alimento do catálogo. Preenche os dados do rótulo para o criar — fica com este código.")
             }
             .sheet(isPresented: $showingJSONImport) {
                 JSONImportSheet(
@@ -155,6 +193,28 @@ struct RecipeEditorView: View {
                 }
             }
         }
+    }
+
+    private func isSelected(_ food: FoodItem) -> Bool { items.contains { $0.foodItemID == food.id } }
+
+    /// Ticks a food into the recipe at one dose, or takes it out again.
+    private func toggle(_ food: FoodItem) {
+        if let index = items.firstIndex(where: { $0.foodItemID == food.id }) {
+            items.remove(at: index)
+        } else {
+            items.append(RecipeItem(foodItemID: food.id, quantity: 1))
+        }
+    }
+
+    /// A known code adds its food; an unknown one warns and then opens the manual editor with the code filled in.
+    private func handleScannedCode() {
+        guard let code = scannedCode else { return }
+        scannedCode = nil
+        guard let food = store.foodItem(forBarcode: code) else {
+            unknownBarcode = code
+            return
+        }
+        if !isSelected(food) { toggle(food) }
     }
 
     private func populateIfEditing() {
@@ -200,110 +260,41 @@ struct RecipeEditorView: View {
     }
 }
 
-/// Adds ingredients: search the catalog and pick one or several foods (not already in the
-/// recipe), then their amounts. A barcode can be scanned too, or a new food created.
-private struct RecipeComponentPickerView: View {
-    @Environment(DataStore.self) private var store
-    @Environment(\.dismiss) private var dismiss
+/// One selected ingredient: its name (tap to edit the food) and the amount the recipe uses, typed
+/// in the food's own unit.
+private struct IngredientAmountRow: View {
+    let food: FoodItem
+    @Binding var quantity: Double
+    let cost: String?
+    let onOpen: () -> Void
 
-    let existingFoodIDs: Set<UUID>
-    let onAdd: (UUID, Double) -> Void
-
-    @State private var selection: [UUID] = []
-    @State private var showingAmounts = false
-    @State private var showingNewFoodItem = false
-    /// Barcode to prefill the new food with (scanned but not in the catalog).
-    @State private var newFoodBarcode: String?
-    @State private var showingScanner = false
-    /// What the scanner read, handled once its sheet is gone (an alert can't show over it).
-    @State private var scannedCode: String?
-    @State private var unknownBarcode: String?
-    @State private var alreadyInRecipe: String?
+    @State private var text = ""
 
     var body: some View {
-        NavigationStack {
-            FoodSelectionList(selection: $selection, excluded: existingFoodIDs) {
-                Section {
-                    Button {
-                        showingScanner = true
-                    } label: {
-                        Label("Digitalizar Código de Barras", systemImage: "barcode.viewfinder")
-                    }
-                    Button {
-                        newFoodBarcode = nil
-                        showingNewFoodItem = true
-                    } label: {
-                        Label("Criar Novo Alimento", systemImage: "plus.circle")
-                    }
-                } footer: {
-                    Text("Escolhe vários alimentos de uma vez. Um código que já está no catálogo seleciona esse alimento; um código novo abre a criação manual com o código preenchido.")
+        HStack {
+            Button(action: onOpen) {
+                VStack(alignment: .leading) {
+                    Text(food.name).foregroundStyle(.primary)
+                    Text("\(food.scaledCalories(quantity: quantity)) kcal" + (cost.map { " · \($0)" } ?? ""))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
-            .navigationTitle("Adicionar Alimentos")
-            #if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
-            #endif
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancelar") { dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button(selection.isEmpty ? "Seguinte" : "Seguinte (\(selection.count))") { showingAmounts = true }
-                        .disabled(selection.isEmpty)
-                }
-            }
-            .navigationDestination(isPresented: $showingAmounts) {
-                FoodAmountsView(foodIDs: selection, confirmTitle: "Adicionar") { items, _, _ in
-                    for item in items { onAdd(item.foodItemID, item.quantity) }
-                    dismiss()
-                }
-            }
-            .sheet(isPresented: $showingNewFoodItem) {
-                FoodItemEditorView(initialBarcode: newFoodBarcode) { newItem in
-                    onAdd(newItem.id, 1)
-                    dismiss()
-                }
-            }
-            .sheet(isPresented: $showingScanner, onDismiss: handleScannedCode) {
-                BarcodeScannerView { code in scannedCode = code }
-            }
-            .alert("Alimento Não Encontrado", isPresented: Binding(
-                get: { unknownBarcode != nil },
-                set: { if !$0 { unknownBarcode = nil } }
-            )) {
-                Button("Criar Manualmente") {
-                    newFoodBarcode = unknownBarcode
-                    unknownBarcode = nil
-                    showingNewFoodItem = true
-                }
-                Button("Cancelar", role: .cancel) { unknownBarcode = nil }
-            } message: {
-                Text("O código \(unknownBarcode ?? "") não está em nenhum alimento do catálogo. Preenche os dados do rótulo para o criar — fica com este código.")
-            }
-            .alert("Já Está na Receita", isPresented: Binding(
-                get: { alreadyInRecipe != nil },
-                set: { if !$0 { alreadyInRecipe = nil } }
-            )) {
-                Button("OK", role: .cancel) { alreadyInRecipe = nil }
-            } message: {
-                Text("\(alreadyInRecipe ?? "Este alimento") já faz parte da receita — toca nele na lista para mudar a quantidade.")
-            }
+            .tint(.primary)
+            Spacer()
+            TextField("0", text: $text)
+                #if os(iOS)
+                .keyboardType(.decimalPad)
+                #endif
+                .multilineTextAlignment(.trailing)
+                .frame(width: 70)
+            Text(food.unit.shortLabel).foregroundStyle(.secondary)
         }
-    }
-
-    /// A known code selects its food; an unknown one warns and then opens the manual editor with
-    /// the code filled in.
-    private func handleScannedCode() {
-        guard let code = scannedCode else { return }
-        scannedCode = nil
-        guard let food = store.foodItem(forBarcode: code) else {
-            unknownBarcode = code
-            return
-        }
-        if existingFoodIDs.contains(food.id) {
-            alreadyInRecipe = food.name
-        } else if !selection.contains(food.id) {
-            selection.append(food.id)
+        .onAppear { text = RecipeIngredientEditorView.number(quantity * food.doseSize) }
+        .onChange(of: text) { _, newValue in
+            if food.doseSize > 0, let amount = Double(newValue.replacingOccurrences(of: ",", with: ".")), amount > 0 {
+                quantity = amount / food.doseSize
+            }
         }
     }
 }

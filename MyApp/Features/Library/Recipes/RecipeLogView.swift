@@ -14,6 +14,8 @@ struct RecipeLogView: View {
     let date: Date
     let groupID: UUID?
     let onDone: () -> Void
+    /// Called with the new diary group when a new log is saved (e.g. a meal eaten instead of a planned one).
+    var onLogged: ((UUID) -> Void)?
 
     /// The ingredients shown: the recipe's, plus (when editing) foods logged in the group that
     /// are no longer in the recipe. `quantity` is the default, in doses.
@@ -27,7 +29,9 @@ struct RecipeLogView: View {
 
     /// `date` is the day to log on (for today, the current time is used instead of midnight), or —
     /// when editing — the time it was logged at.
-    init(recipe: Recipe, date: Date, mealType: MealType, groupID: UUID? = nil, onDone: @escaping () -> Void) {
+    init(recipe: Recipe, date: Date, mealType: MealType, groupID: UUID? = nil,
+         onLogged: ((UUID) -> Void)? = nil, onDone: @escaping () -> Void) {
+        self.onLogged = onLogged
         self.recipe = recipe
         self.date = date
         self.groupID = groupID
@@ -177,7 +181,9 @@ struct RecipeLogView: View {
         if let groupID {
             store.relogRecipe(recipe, group: groupID, items: chosen, mealType: mealType, date: logDate)
         } else {
-            store.logRecipe(recipe, items: chosen, mealType: mealType, date: logDate)
+            if let group = store.logRecipe(recipe, items: chosen, mealType: mealType, date: logDate) {
+                onLogged?(group)
+            }
             AppAnalytics.log(.entryLogged(source: .recipe, mealType: mealType))
         }
         onDone()

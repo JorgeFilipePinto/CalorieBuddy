@@ -4,6 +4,10 @@ struct ContentView: View {
     @State private var selectedTab = 0
     /// The day shown on "Hoje" (`nil` = today), stepped with the arrows in its title.
     @State private var selectedDay: Date?
+    /// "Recusar" tapped on a planned meal's Live Activity.
+    @Bindable private var mealActivities = MealActivityRouter.shared
+    /// A PDF or photo shared to the app: asks which kind of exam it is.
+    @Bindable private var examInbox = ExamInbox.shared
 
     var body: some View {
         TabView(selection: $selectedTab) {
@@ -39,6 +43,12 @@ struct ContentView: View {
         }
         // A light tick on every tab switch, matching the rest of the app's tactile feedback.
         .onChange(of: selectedTab) { _, _ in Haptics.selection() }
+        .sheet(item: $mealActivities.refusing) { placement in
+            PlacementSubstituteView(placement: placement)
+        }
+        .sheet(item: $examInbox.pending) { file in
+            ShareExamSheet(file: file)
+        }
     }
 }
 

@@ -13,26 +13,32 @@ struct SupplementPickerView: View {
     let date: Date
     /// Set when the supplement is already known (scanned): no picker, just the amount.
     let fixedSupplementID: UUID?
+    /// Adds a "+" to create a supplement here (by hand or read from the label by an AI) when it isn't
+    /// on the list yet — the new one is selected.
+    let allowsCreating: Bool
+    /// Set when it's taken for an activity: the log is linked to it (com suplementação).
+    let workout: HealthKitManager.WorkoutSummary?
+    /// How it was taken, in the athlete's words.
+    @State private var notes = ""
+    @State private var showingNewSupplement = false
+    @State private var showingJSONImport = false
 
     @State private var selectedSupplementID: UUID?
     @State private var wholeDoses = 1
     @State private var percentage = 0
 
-    @State private var showingStockChoice = false
-    /// What the stock sheet chose; logged once the sheet is gone (an alert can't show over it).
-    @State private var pendingStock: StockChoice?
+    /// The stock the intake comes out of (nil = none), suggested when a supplement is chosen and
+    /// always changeable here.
+    @State private var stockSelection: UUID?
 
     @State private var showingLowStockAlert = false
     @State private var lowStockSupplementName = ""
 
     private let percentageOptions = [0, 25, 50, 75]
 
-    enum StockChoice: Equatable {
-        case stock(UUID)
-        case none
-    }
-
-    init(date: Date, supplement: Supplement? = nil) {
+    init(date: Date, supplement: Supplement? = nil, allowsCreating: Bool = false, workout: HealthKitManager.WorkoutSummary? = nil) {
+        self.allowsCreating = allowsCreating
+        self.workout = workout
         self.date = date
         self.fixedSupplementID = supplement?.id
         _selectedSupplementID = State(initialValue: supplement?.id)
@@ -84,6 +90,16 @@ struct SupplementPickerView: View {
                     }
                 }
 
+                // Always there, not only once a supplement is chosen: how it was taken.
+                Section {
+                    TextField("Como foi tomado (opcional)", text: $notes, axis: .vertical)
+                        .lineLimit(2...6)
+                } header: {
+                    Text("Descrição")
+                } footer: {
+                    Text(workout == nil ? "Explica a abordagem: quando, com quê, porquê." : "Explica a abordagem neste treino: quando tomaste, com quê, porquê.")
+                }
+
                 if let selectedSupplement {
                     Section {
                         HStack {
@@ -113,10 +129,10 @@ struct SupplementPickerView: View {
                             .foregroundStyle(.secondary)
                     } header: {
                         Text("Quantidade")
-                    } footer: {
-                        if !selectedSupplement.stocks.isEmpty {
-                            Text("A seguir escolhes de que stock saiu.")
-                        }
+                    }
+
+                    if !selectedSupplement.stocks.isEmpty {
+                        SupplementStockSection(supplement: selectedSupplement, quantity: quantity, selection: $stockSelection)
                     }
                 }
             }
@@ -125,18 +141,44 @@ struct SupplementPickerView: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancelar") { dismiss() }
                 }
+                if allowsCreating {
+                    ToolbarItem(placement: .primaryAction) {
+                        Menu {
+                            Button { showingNewSupplement = true } label: {
+                                Label("Novo Suplemento", systemImage: "square.and.pencil")
+                            }
+                            Button { showingJSONImport = true } label: {
+                                Label("Novo com IA (foto ou texto)", systemImage: "sparkles")
+                            }
+                        } label: {
+                            Image(systemName: "plus")
+                        }
+                    }
+                }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Registar") { register() }
                         .disabled(selectedSupplement == nil)
                 }
             }
-            .sheet(isPresented: $showingStockChoice, onDismiss: logPendingChoice) {
-                if let selectedSupplement {
-                    StockChoiceView(supplement: selectedSupplement, quantity: quantity) { choice in
-                        pendingStock = choice
-                        showingStockChoice = false
-                    }
+            .sheet(isPresented: $showingNewSupplement) { SupplementEditorView() }
+            .sheet(isPresented: $showingJSONImport) {
+                JSONImportSheet(
+                    title: "Novo Suplemento com IA",
+                    prompt: AIJSONImport.supplementPrompt(categories: store.supplementCategories.map(\.name)),
+                    instructions: "Envia uma foto do rótulo (ou descreve o suplemento): a IA devolve a embalagem, a dose e os macros. Um suplemento com o mesmo nome de um já existente é mantido como está; o novo fica escolhido aqui."
+                ) { json in
+                    let payloads = try AIJSONImport.decodeSupplements(from: json)
+                    guard !payloads.isEmpty else { throw AIImportError.empty }
+                    for payload in payloads { store.catalogSupplement(for: payload) }
                 }
+            }
+            // A supplement created here is the one to log.
+            .onChange(of: store.supplements.count) { old, new in
+                if allowsCreating, new > old, let created = store.supplements.last { selectedSupplementID = created.id }
+            }
+            // The stock suggested for the supplement: the last one used, else the fullest.
+            .onChange(of: selectedSupplementID, initial: true) { _, _ in
+                stockSelection = selectedSupplement.flatMap { store.preferredStockID(for: $0) }
             }
             .alert("Stock Baixo", isPresented: $showingLowStockAlert) {
                 Button("OK", role: .cancel) { dismiss() }
@@ -146,24 +188,9 @@ struct SupplementPickerView: View {
         }
     }
 
-    /// With stock to draw from, asks which one first; without, logs straight away.
+    /// Logs the intake from the stock chosen above (or none).
     private func register() {
-        guard let selectedSupplement else { return }
-        if selectedSupplement.stocks.isEmpty {
-            log(stockID: nil)
-        } else {
-            pendingStock = nil
-            showingStockChoice = true
-        }
-    }
-
-    private func logPendingChoice() {
-        guard let choice = pendingStock else { return }  // sheet closed without choosing
-        pendingStock = nil
-        switch choice {
-        case .stock(let id): log(stockID: id)
-        case .none: log(stockID: nil)
-        }
+        log(stockID: stockSelection)
     }
 
     private func log(stockID: UUID?) {
@@ -172,7 +199,9 @@ struct SupplementPickerView: View {
             selectedSupplement,
             stockID: stockID,
             quantity: quantity,
-            date: date
+            date: date,
+            notes: notes,
+            workout: workout
         )
         AppAnalytics.log(.entryLogged(source: .supplement, mealType: nil))
         if isLowStock {
@@ -211,62 +240,58 @@ struct SupplementPickerView: View {
     }
 }
 
-/// Which stock a dose came from: each location with what's left (and what will be left), or
-/// none — the dose is logged without touching any stock.
-private struct StockChoiceView: View {
+/// The stocks of a supplement, to pick the one an intake comes out of (the suggested one is already
+/// selected) or none: each with what is left and what will be left. `returning`: what the intake
+/// being edited had already taken from `returningStock`, which counts as available again.
+struct SupplementStockSection: View {
     @Environment(DataStore.self) private var store
 
     let supplement: Supplement
-    /// Doses being logged.
+    /// Doses of this intake.
     let quantity: Double
-    let choose: (SupplementPickerView.StockChoice) -> Void
+    @Binding var selection: UUID?
+    var returningStock: UUID?
+    var returning: Double = 0
 
     private var amount: Double { quantity * supplement.doseSize }
 
     var body: some View {
-        NavigationStack {
-            List {
-                Section {
-                    ForEach(supplement.stocks) { stock in
-                        let locationName = store.stockLocation(withID: stock.locationID)?.name ?? "Local"
-                        let enough = stock.remaining >= amount
-                        Button {
-                            choose(.stock(stock.id))
-                        } label: {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(locationName)
-                                        .foregroundStyle(.primary)
-                                    Text("\(formatted(stock.remaining)) \(supplement.unit.shortLabel) → fica \(formatted(max(stock.remaining - amount, 0))) \(supplement.unit.shortLabel)")
-                                        .font(.caption)
-                                        .foregroundStyle(enough ? Color.secondary : Color.red)
-                                }
-                                Spacer()
-                                Image(systemName: "shippingbox")
-                                    .foregroundStyle(.secondary)
-                            }
+        Section {
+            ForEach(supplement.stocks) { stock in
+                let locationName = store.stockLocation(withID: stock.locationID)?.name ?? "Local"
+                let available = stock.remaining + (stock.id == returningStock ? returning * supplement.doseSize : 0)
+                Button {
+                    selection = stock.id
+                } label: {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(locationName).foregroundStyle(.primary)
+                            Text("\(formatted(available)) \(supplement.unit.shortLabel) → fica \(formatted(max(available - amount, 0))) \(supplement.unit.shortLabel)")
+                                .font(.caption)
+                                .foregroundStyle(available >= amount ? Color.secondary : Color.red)
                         }
-                        // Rows read as a list to pick from, not as red action buttons.
-                        .tint(.primary)
+                        Spacer()
+                        Image(systemName: selection == stock.id ? "checkmark.circle.fill" : "circle")
+                            .foregroundStyle(selection == stock.id ? Color.accentColor : .secondary)
                     }
-                } header: {
-                    Text("De que stock saiu?")
-                } footer: {
-                    Text("Total em stock: \(formatted(supplement.totalRemaining)) \(supplement.unit.shortLabel) (\(formatted(supplement.doses(in: supplement.totalRemaining))) doses). Esta toma retira \(formatted(amount)) \(supplement.unit.shortLabel).")
                 }
-
-                Section {
-                    Button("Não descontar de nenhum stock") {
-                        choose(.none)
-                    }
+                .tint(.primary)
+            }
+            Button {
+                selection = nil
+            } label: {
+                HStack {
+                    Text("Não descontar de nenhum stock").foregroundStyle(.primary)
+                    Spacer()
+                    Image(systemName: selection == nil ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(selection == nil ? Color.accentColor : .secondary)
                 }
             }
-            .navigationTitle(supplement.name)
-            #if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
-            #endif
+        } header: {
+            Text("De que stock sai?")
+        } footer: {
+            Text("Esta toma retira \(formatted(amount)) \(supplement.unit.shortLabel). Se a mudares depois, o stock é reposto e descontado outra vez.")
         }
-        .presentationDetents([.medium, .large])
     }
 
     private func formatted(_ value: Double) -> String {
