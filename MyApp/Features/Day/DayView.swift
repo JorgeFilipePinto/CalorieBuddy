@@ -35,6 +35,7 @@ struct DayView: View {
     @State private var supplementLogToDescribe: SupplementLogEntry?
     @State private var showingScannerEntry = false
     @State private var showingCatalogPicker = false
+    @State private var showingWeighMeal = false
     @State private var showingRecipePicker = false
     @State private var showingMealPlanPicker = false
     @State private var showingSupplementPicker = false
@@ -315,6 +316,11 @@ struct DayView: View {
                         Label("Do Catálogo", systemImage: "tray.full")
                     }
                     Button {
+                        showingWeighMeal = true
+                    } label: {
+                        Label("Pesar Comida", systemImage: "scalemass")
+                    }
+                    Button {
                         showingMealPlanPicker = true
                     } label: {
                         Label("Do Plano Alimentar", systemImage: "list.clipboard")
@@ -370,6 +376,9 @@ struct DayView: View {
         }
         .sheet(isPresented: $showingCatalogPicker) {
             CatalogPickerView(date: date)
+        }
+        .sheet(isPresented: $showingWeighMeal) {
+            WeighMealView(date: date)
         }
         .sheet(isPresented: $showingRecipePicker) {
             RecipePickerView(date: date)

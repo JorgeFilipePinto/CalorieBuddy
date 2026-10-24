@@ -937,6 +937,7 @@ final class PlatformSyncManager {
             "preparation": item.preparation?.rawValue ?? NSNull(),
             "label_photo_paths": item.labelPhotoIDs.map { photoPath("food", $0) },
             "cooking_weight_change": item.cookingWeightChange.flatMap { $0 > -100 && $0 <= 1000 ? $0 : nil } ?? NSNull(),
+            "density_g_per_ml": item.densityGramsPerMl.flatMap { $0 > 0 && $0 <= 20 ? $0 : nil } ?? NSNull(),
             "source": "ios_app",
             "deleted_at": NSNull()
         ]
@@ -1459,7 +1460,8 @@ private struct PlatformSyncState: Codable {
     /// food_items.cooking_weight_change (pantry_meal_prep).
     /// 6: food subcategories and preparations (base_food_id, preparation), cooking_yields.method.
     /// 7: body measurements (body_measurements). 8: exams (lab_reports, other_exams).
-    static let currentTypedRowsVersion = 9
+    /// 10: food_items.density_g_per_ml (migration food_density).
+    static let currentTypedRowsVersion = 10
 
     /// One file per server: a Debug build (local Supabase) and a Release build (the VPS) on the
     /// same iPhone must not share what they think was already sent.

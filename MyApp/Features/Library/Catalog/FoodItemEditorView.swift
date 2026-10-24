@@ -23,6 +23,8 @@ struct FoodItemEditorView: View {
     @State private var labelPhotoIDs: [UUID] = []
     @State private var brand = ""
     @State private var categoryID: UUID?
+    @State private var iconName: String?
+    @State private var densityText = ""
     @State private var unit: MeasurementUnit = .gram
     @State private var doseSizeText = "100"
     @State private var nutritionBasis: NutritionBasis = .per100
@@ -141,6 +143,14 @@ struct FoodItemEditorView: View {
                 NutritionLabelPhotosSection(photoIDs: $labelPhotoIDs)
                 #endif
 
+                Section {
+                    FoodIconPicker(selection: $iconName)
+                } header: {
+                    Text("Ícone")
+                } footer: {
+                    Text("Aparece ao pesar uma refeição com a balança.")
+                }
+
                 Section("Alimento") {
                     TextField("Nome", text: $name)
                     TextField("Marca (opcional)", text: $brand)
@@ -153,6 +163,19 @@ struct FoodItemEditorView: View {
                     Picker("Unidade", selection: $unit) {
                         ForEach(MeasurementUnit.allCases) { measurementUnit in
                             Text(measurementUnit.shortLabel).tag(measurementUnit)
+                        }
+                    }
+                    if unit.baseUnit == .milliliter {
+                        HStack {
+                            Text("Densidade")
+                            Spacer()
+                            TextField("\(RecipeIngredientEditorView.number(FoodItem.defaultDensity))", text: $densityText)
+                                #if os(iOS)
+                                .keyboardType(.decimalPad)
+                                #endif
+                                .multilineTextAlignment(.trailing)
+                                .frame(width: 80)
+                            Text("g/ml").foregroundStyle(.secondary)
                         }
                     }
                     HStack {
@@ -385,6 +408,8 @@ struct FoodItemEditorView: View {
         labelPhotoIDs = item.labelPhotoIDs
         brand = item.brand ?? ""
         categoryID = item.categoryID
+        iconName = item.iconName
+        densityText = item.densityGramsPerMl.map { RecipeIngredientEditorView.number($0) } ?? ""
         unit = item.unit
         doseSizeText = formatted(item.doseSize)
         nutritionBasis = item.nutritionBasis
@@ -497,6 +522,8 @@ struct FoodItemEditorView: View {
             categoryID: categoryID
         )
         item.labelPhotoIDs = labelPhotoIDs
+        item.iconName = iconName
+        item.densityGramsPerMl = unit.baseUnit == .milliliter ? LabelNutritionText.number(densityText).flatMap { $0 > 0 && $0 <= 20 ? $0 : nil } : nil
         item.cookingWeightChange = unit.baseUnit == .unit ? nil : cookingChange
         item.saturatedFat = LabelNutritionText.number(saturatedFatText)
         item.sugars = LabelNutritionText.number(sugarsText)
