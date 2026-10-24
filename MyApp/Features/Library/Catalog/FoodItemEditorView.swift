@@ -87,6 +87,19 @@ struct FoodItemEditorView: View {
         )
     }
 
+    /// The user switched "Por 100 / Por dose": the label values (and vitamins, minerals…) are converted to the
+    /// new basis using the dose size, so the table shows what one dose — or 100 g/ml — holds.
+    private func switchBasis(to new: NutritionBasis) {
+        let old = nutritionBasis
+        nutritionBasis = new
+        let dose = LabelNutritionText.number(doseSizeText)
+        guard let factor = NutritionBasisConversion.factor(from: old, to: new, doseSize: dose, unit: unit) else { return }
+        labelText.wrappedValue = labelText.wrappedValue.scaled(by: factor)
+        micronutrients = micronutrients.scaled(by: factor)
+        minerals = minerals.scaled(by: factor)
+        vitamins = vitamins.scaled(by: factor)
+    }
+
     private var basisDescription: String {
         nutritionBasis == .per100 ? "por \(per100Label)" : "por dose"
     }
@@ -105,8 +118,11 @@ struct FoodItemEditorView: View {
     }
 
     var body: some View {
-        // A preparation (Frango grelhado) is edited as one: its label comes from the raw food.
-        if let itemToEdit, let base = store.baseFood(of: itemToEdit) {
+        // A supplement used as food is edited as the supplement: its label comes from there.
+        if let itemToEdit, let supplement = store.supplement(mirroredBy: itemToEdit) {
+            SupplementEditorView(supplementToEdit: supplement)
+        } else if let itemToEdit, let base = store.baseFood(of: itemToEdit) {
+            // A preparation (Frango grelhado) is edited as one: its label comes from the raw food.
             NavigationStack {
                 FoodPreparationEditorView(base: base, existing: itemToEdit)
             }
@@ -153,7 +169,7 @@ struct FoodItemEditorView: View {
                 }
 
                 Section {
-                    Picker("Valores indicados", selection: $nutritionBasis) {
+                    Picker("Valores indicados", selection: Binding(get: { nutritionBasis }, set: { switchBasis(to: $0) })) {
                         ForEach(NutritionBasis.allCases) { basis in
                             Text(basis == .per100 ? "Por \(per100Label)" : "Por dose").tag(basis)
                         }
@@ -266,10 +282,11 @@ struct FoodItemEditorView: View {
                 JSONImportSheet(
                     title: "Importar Alimento",
                     prompt: AIJSONImport.foodPrompt(categories: store.foodCategories.map(\.name)),
-                    instructions: "Útil quando não há rótulo à mão. Se a resposta tiver vários alimentos, o primeiro preenche este formulário e os restantes são adicionados diretamente ao catálogo."
-                ) { json in
-                    try handleJSONImport(json)
-                }
+                    instructions: "Útil quando não há rótulo à mão. Se a resposta tiver vários alimentos, o primeiro preenche este formulário e os restantes são adicionados diretamente ao catálogo.",
+                    onImportKeepingPhotos: { json, photos in
+                        try handleJSONImport(json, photos: photos)
+                    }
+                )
             }
             .sheet(isPresented: $showScanner) {
                 BarcodeScannerView { code in
@@ -314,10 +331,16 @@ struct FoodItemEditorView: View {
 
     /// Applies AI-provided JSON to this form: the first food fills the fields for review before
     /// saving, and any further ones (from a pasted array) are added straight to the catalog.
-    private func handleJSONImport(_ json: String) throws {
+    private func handleJSONImport(_ json: String, photos: ImportedPhotos) throws {
         let payloads = try AIJSONImport.decodeFoodItems(from: json)
         guard let first = payloads.first else { throw AIImportError.empty }
         applyFoodPayload(first)
+        // One food: the photos taken for the import become this food's photo and label photo (shown
+        // below, kept when saved). With several, there is no way to tell which one they belong to.
+        if payloads.count == 1 {
+            if photoID == nil, let data = photos.product { photoID = PhotoStore.save(jpeg: data) }
+            if let data = photos.label, let id = PhotoStore.save(jpeg: data) { labelPhotoIDs.append(id) }
+        }
         for extra in payloads.dropFirst() {
             store.catalogFood(for: extra)
         }

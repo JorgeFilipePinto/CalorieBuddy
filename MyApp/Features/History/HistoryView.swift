@@ -3,6 +3,7 @@ import SwiftUI
 /// Every day with something recorded, grouped into collapsible months. Each month's header
 /// already says what was trained — kilometres per sport, time for the gym — before expanding it.
 struct HistoryView: View {
+    @Environment(PlatformSyncManager.self) private var platform
     @Environment(DataStore.self) private var store
     @Environment(HealthKitManager.self) private var healthKit
 
@@ -162,6 +163,7 @@ struct HistoryView: View {
         }
         .refreshable {
             Haptics.light()
+            await platform.refresh()
             await healthKit.refresh(days: daysLoaded)
         }
     }
@@ -257,7 +259,7 @@ struct HistoryView: View {
     }
 
     private func dayRow(_ day: Date) -> some View {
-        let hasFood = !store.entries(on: day).isEmpty
+        let hasFood = !store.entries(on: day).isEmpty || !store.supplementLogs(on: day).isEmpty
         let waterML = Int((healthKit.waterLiters(on: day) * 1000).rounded())
         let burned = healthKit.caloriesBurned(on: day)
         let coffees = healthKit.coffeeCount(on: day)

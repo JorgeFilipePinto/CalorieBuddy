@@ -86,6 +86,13 @@ struct FoodEntry: Identifiable, Codable, Equatable {
     /// The recipe this was logged from (as part of `groupID`): editing the recipe regenerates the
     /// group. `nil` when logged otherwise (including a meal-plan option with swapped foods).
     var recipeID: UUID? = nil
+    /// Set when `foodItemID` is a supplement's mirror food: the stock the supplement's amount was
+    /// taken from and how much (in the supplement's unit), so deleting the entry gives it back.
+    var supplementStockID: UUID? = nil
+    var supplementUsed: Double? = nil
+    /// A sporadic meal that isn't in the catalog: its description and photo (`PhotoStore`; uploaded to `food/<id>.jpg`).
+    var notes: String? = nil
+    var photoID: UUID? = nil
 
     var nutrition: NutritionAmounts {
         NutritionAmounts(
@@ -430,6 +437,9 @@ struct FoodItem: Identifiable, Codable, Hashable, Doseable, Favoritable {
     var baseFoodID: UUID?
     /// How it's prepared (raw, grilled, boiled…); `nil` = not stated.
     var preparation: FoodPreparation?
+    /// Set on the mirror food of a supplement used as food (same id as the supplement): its label
+    /// comes from the supplement and it is edited there.
+    var supplementID: UUID?
 
     init(
         id: UUID = UUID(),
@@ -474,7 +484,7 @@ struct FoodItem: Identifiable, Codable, Hashable, Doseable, Favoritable {
     private enum CodingKeys: String, CodingKey {
         case id, name, brand, unit, doseSize, nutritionBasis, calories, protein, carbs, fat,
              minerals, vitamins, barcodes, prices, isFavorite, createdAt, photoID, categoryID, labelPhotoIDs,
-             saturatedFat, sugars, fiber, salt, micronutrients, cookingWeightChange, baseFoodID, preparation
+             saturatedFat, sugars, fiber, salt, micronutrients, cookingWeightChange, baseFoodID, preparation, supplementID
     }
 
     /// Only for reading the old singular `barcode` field from databases saved before this was
@@ -526,6 +536,7 @@ struct FoodItem: Identifiable, Codable, Hashable, Doseable, Favoritable {
         baseFoodID = try container.decodeIfPresent(UUID.self, forKey: .baseFoodID)
         // A preparation this version doesn't know is read as "not stated".
         preparation = (try? container.decodeIfPresent(FoodPreparation.self, forKey: .preparation)) ?? nil
+        supplementID = try container.decodeIfPresent(UUID.self, forKey: .supplementID)
     }
 
     /// Moves the free-text `values` the fixed list knows into `micros` (in their own unit) and
@@ -731,6 +742,9 @@ struct Supplement: Identifiable, Codable, Hashable, Doseable, Favoritable {
     var barcodes: [String]
     /// Photos of its nutrition label, in `PhotoStore` (front, back…), for checking the values.
     var labelPhotoIDs: [UUID] = []
+    /// Can be used as a food (in recipes and the diary): the catalog then holds a mirror food with
+    /// the same id (`FoodItem.supplementID`) and eating it takes its amount off the stock.
+    var usableAsFood: Bool = false
 
     init(
         id: UUID = UUID(),
@@ -773,7 +787,7 @@ struct Supplement: Identifiable, Codable, Hashable, Doseable, Favoritable {
     private enum CodingKeys: String, CodingKey {
         case id, name, categoryID, unit, totalSize, doseSize, calories, protein, carbs, fat,
              prices, stocks, lowStockThreshold, isFavorite, createdAt, photoID, barcodes, labelPhotoIDs,
-             nutritionBasis, saturatedFat, sugars, fiber, salt, micronutrients
+             nutritionBasis, saturatedFat, sugars, fiber, salt, micronutrients, usableAsFood
     }
 
     init(from decoder: Decoder) throws {
@@ -805,6 +819,7 @@ struct Supplement: Identifiable, Codable, Hashable, Doseable, Favoritable {
         fiber = try container.decodeIfPresent(Double.self, forKey: .fiber)
         salt = try container.decodeIfPresent(Double.self, forKey: .salt)
         micronutrients = try container.decodeIfPresent([String: Double].self, forKey: .micronutrients) ?? [:]
+        usableAsFood = try container.decodeIfPresent(Bool.self, forKey: .usableAsFood) ?? false
     }
 
     /// Multiplier turning the stored nutrition values into "nutrition for one dose".
@@ -853,6 +868,24 @@ struct SupplementLogEntry: Identifiable, Codable, Equatable {
     var stockID: UUID?
     var quantity: Double
     var date: Date
+    /// How it was taken ("2 géis aos 45 min, cafeína antes"): the approach, in the athlete's words.
+    var notes: String? = nil
+    /// The workout it was taken for (`WorkoutSupplementPrompts.key`), when logged from an activity.
+    var workoutKey: String? = nil
+}
+
+/// The answer to "did you take any supplement in this workout?": with or without supplementation.
+/// One per workout — its id comes from the workout's key, so the app and the dashboard agree on it.
+/// What was taken is in the supplement logs with the same `workoutKey`.
+struct WorkoutSupplementAnswer: Identifiable, Codable, Equatable {
+    var id: UUID
+    var workoutKey: String
+    var startedAt: Date
+    /// The activity as shown ("Corrida"), so the record reads on its own.
+    var kind: String
+    /// true = com suplementação, false = sem suplementação.
+    var consumed: Bool
+    var answeredAt: Date = Date()
 }
 
 /// One food item and how many doses of it a recipe uses.
@@ -1212,6 +1245,9 @@ extension Array where Element == NutritionPlan {
 /// database; weight, body fat %, BMI and lean mass still come from Apple Health.
 enum BodyMetric: String, Codable, CaseIterable, Identifiable {
     case bodyFat, muscleMass, leanMass, visceralFat
+    /// More bioimpedance values (the scale or the nutritionist's device): body water %, bone mass,
+    /// basal metabolic rate and metabolic age. Only kept in the app's database (and the platform).
+    case bodyWater, boneMass, basalMetabolicRate, metabolicAge
     case neck, chest, arm, waist, hip, thigh, calf
 
     var id: String { rawValue }
@@ -1222,6 +1258,10 @@ enum BodyMetric: String, Codable, CaseIterable, Identifiable {
         case .muscleMass: return "Massa Muscular"
         case .leanMass: return "Massa Magra"
         case .visceralFat: return "Gordura Visceral"
+        case .bodyWater: return "Água Corporal"
+        case .boneMass: return "Massa Óssea"
+        case .basalMetabolicRate: return "Metabolismo Basal"
+        case .metabolicAge: return "Idade Metabólica"
         case .neck: return "Pescoço"
         case .chest: return "Peito"
         case .arm: return "Braço"
@@ -1235,9 +1275,11 @@ enum BodyMetric: String, Codable, CaseIterable, Identifiable {
     /// "%", "kg", "" (visceral fat is a unitless level) or "cm".
     var unitLabel: String {
         switch self {
-        case .bodyFat: return "%"
-        case .muscleMass, .leanMass: return "kg"
+        case .bodyFat, .bodyWater: return "%"
+        case .muscleMass, .leanMass, .boneMass: return "kg"
         case .visceralFat: return ""
+        case .basalMetabolicRate: return "kcal"
+        case .metabolicAge: return "anos"
         default: return "cm"
         }
     }
@@ -1248,13 +1290,17 @@ enum BodyMetric: String, Codable, CaseIterable, Identifiable {
         case .muscleMass: return "figure.strengthtraining.traditional"
         case .leanMass: return "figure.walk"
         case .visceralFat: return "circle.dashed.inset.filled"
+        case .bodyWater: return "drop.fill"
+        case .boneMass: return "figure.arms.open"
+        case .basalMetabolicRate: return "flame.fill"
+        case .metabolicAge: return "hourglass"
         default: return "ruler"
         }
     }
 
     var isCircumference: Bool {
         switch self {
-        case .bodyFat, .muscleMass, .leanMass, .visceralFat: return false
+        case .bodyFat, .muscleMass, .leanMass, .visceralFat, .bodyWater, .boneMass, .basalMetabolicRate, .metabolicAge: return false
         default: return true
         }
     }
@@ -1275,6 +1321,10 @@ enum BodyMetric: String, Codable, CaseIterable, Identifiable {
         case .muscleMass: return 5...150
         case .leanMass: return 20...150
         case .visceralFat: return 1...59
+        case .bodyWater: return 30...80
+        case .boneMass: return 1...8
+        case .basalMetabolicRate: return 800...4000
+        case .metabolicAge: return 10...100
         case .neck: return 20...70
         case .chest: return 50...200
         case .arm: return 15...70
@@ -1296,6 +1346,14 @@ enum BodyMetric: String, Codable, CaseIterable, Identifiable {
             return "Tudo o que não é gordura — músculo, ossos, órgãos e água —, ou seja peso − massa gorda. É sempre maior do que a massa muscular. Lê-o da balança ou da avaliação, nas mesmas condições do peso."
         case .visceralFat:
             return "Nível de gordura visceral (1–59) indicado pela balança de bioimpedância. Até 12 é considerado saudável na maioria das balanças."
+        case .bodyWater:
+            return "Percentagem de água no corpo, lida da balança de bioimpedância ou da avaliação. Varia com a hidratação: mede nas mesmas condições (de manhã, em jejum)."
+        case .boneMass:
+            return "Peso estimado dos ossos, em kg, lido da balança de bioimpedância ou da avaliação."
+        case .basalMetabolicRate:
+            return "Energia que o corpo gasta em repouso num dia, em kcal, estimada pela balança de bioimpedância ou pela avaliação."
+        case .metabolicAge:
+            return "Idade metabólica estimada pela balança de bioimpedância ou pela avaliação: compara o teu metabolismo basal com o médio de cada idade."
         case .neck:
             return "Fita logo abaixo da maçã de Adão, ligeiramente inclinada para a frente e para baixo. Olha em frente, ombros relaxados."
         case .chest:
@@ -1370,6 +1428,19 @@ struct ProgressPhoto: Identifiable, Codable, Equatable {
     var notes: String?
 }
 
+/// A question to ask at the next appointment (with the nutritionist, say). Written down in
+/// advance, shown when the appointment starts, answered there and kept as a record afterwards.
+struct ConsultationQuestion: Identifiable, Codable, Equatable {
+    var id: UUID = UUID()
+    var text: String
+    var createdAt: Date = Date()
+    /// What was answered at the appointment (nil while still to ask).
+    var answer: String?
+    var answeredAt: Date?
+
+    var isAnswered: Bool { answeredAt != nil }
+}
+
 /// The full contents of a CalorieBuddy database, as exported/imported via JSON.
 ///
 /// Uses a custom decoder so that databases exported before `foodItems`/`recipes`/`mealPlans`
@@ -1399,6 +1470,11 @@ struct AppDatabase: Codable {
     var mealPreps: [MealPrep]
     var mealBoardPlacements: [MealBoardPlacement]
     var mealBoardDays: [MealBoardDay]
+    var consultationQuestions: [ConsultationQuestion]
+    var labReports: [LabReport]
+    var otherExams: [OtherExam]
+    var workoutSupplementAnswers: [WorkoutSupplementAnswer]
+    var reminders: [Reminder]
 
     init(
         version: Int,
@@ -1422,7 +1498,12 @@ struct AppDatabase: Codable {
         cookingYields: [CookingYield] = [],
         mealPreps: [MealPrep] = [],
         mealBoardPlacements: [MealBoardPlacement] = [],
-        mealBoardDays: [MealBoardDay] = []
+        mealBoardDays: [MealBoardDay] = [],
+        consultationQuestions: [ConsultationQuestion] = [],
+        labReports: [LabReport] = [],
+        otherExams: [OtherExam] = [],
+        workoutSupplementAnswers: [WorkoutSupplementAnswer] = [],
+        reminders: [Reminder] = []
     ) {
         self.version = version
         self.exportedAt = exportedAt
@@ -1446,13 +1527,18 @@ struct AppDatabase: Codable {
         self.mealPreps = mealPreps
         self.mealBoardPlacements = mealBoardPlacements
         self.mealBoardDays = mealBoardDays
+        self.consultationQuestions = consultationQuestions
+        self.labReports = labReports
+        self.otherExams = otherExams
+        self.workoutSupplementAnswers = workoutSupplementAnswers
+        self.reminders = reminders
     }
 
     private enum CodingKeys: String, CodingKey {
         case version, exportedAt, settings, entries, foodItems, recipes, stores,
              supplementCategories, supplements, supplementLogs, stockLocations, mealPlans, nutritionPlans,
              bodyMeasurements, progressPhotos, foodCategories, pantryLocations, pantryLots, cookingYields, mealPreps,
-             mealBoardPlacements, mealBoardDays
+             mealBoardPlacements, mealBoardDays, consultationQuestions, labReports, otherExams, workoutSupplementAnswers, reminders
     }
 
     /// Databases written before several meal plans existed had at most one, under `mealPlan`.
@@ -1489,5 +1575,10 @@ struct AppDatabase: Codable {
         mealPreps = try container.decodeIfPresent([MealPrep].self, forKey: .mealPreps) ?? []
         mealBoardPlacements = try container.decodeIfPresent([MealBoardPlacement].self, forKey: .mealBoardPlacements) ?? []
         mealBoardDays = try container.decodeIfPresent([MealBoardDay].self, forKey: .mealBoardDays) ?? []
+        consultationQuestions = try container.decodeIfPresent([ConsultationQuestion].self, forKey: .consultationQuestions) ?? []
+        labReports = try container.decodeIfPresent([LabReport].self, forKey: .labReports) ?? []
+        otherExams = try container.decodeIfPresent([OtherExam].self, forKey: .otherExams) ?? []
+        workoutSupplementAnswers = try container.decodeIfPresent([WorkoutSupplementAnswer].self, forKey: .workoutSupplementAnswers) ?? []
+        reminders = try container.decodeIfPresent([Reminder].self, forKey: .reminders) ?? []
     }
 }

@@ -3,6 +3,7 @@ import SwiftUI
 /// Shows all entries for a single day, with a totals header and a way to add/edit/delete entries.
 /// Used both for "Hoje" (today) and for drilling into a past day from the history list.
 struct DayView: View {
+    @Environment(PlatformSyncManager.self) private var platform
     @Environment(DataStore.self) private var store
     @Environment(HealthKitManager.self) private var healthKit
     let date: Date
@@ -23,6 +24,15 @@ struct DayView: View {
     }
 
     @State private var showingAddEntry = false
+    /// The workout the alert asks about ("Consumiste algum suplemento?"), and the one whose supplement is being logged.
+    @State private var supplementQuestion: HealthKitManager.WorkoutSummary?
+    @State private var supplementWorkout: HealthKitManager.WorkoutSummary?
+    /// The activity whose picker is open (to know, once it closes, whether anything was logged).
+    @State private var lastAskedWorkout: HealthKitManager.WorkoutSummary?
+    /// Activities whose picker was cancelled this time: nothing was saved, and they aren't asked again until the next time.
+    @State private var skippedSupplementQuestions: Set<String> = []
+    /// An intake already logged, opened to read or change its description.
+    @State private var supplementLogToDescribe: SupplementLogEntry?
     @State private var showingScannerEntry = false
     @State private var showingCatalogPicker = false
     @State private var showingRecipePicker = false
@@ -32,9 +42,26 @@ struct DayView: View {
     @State private var jsonImportGroupName = ""
     @State private var jsonImportMealType: MealType = .lunch
     @State private var entryToEdit: FoodEntry?
+    @State private var entryToDuplicate: FoodEntry?
     /// A logged recipe whose amounts are being changed (tapping one of its entries).
     @State private var recipeLogToEdit: FoodEntry?
     @State private var showingDayNutrients = false
+    /// A planned meal being refused (picking what was eaten instead).
+    @State private var refusing: MealBoardPlacement?
+
+    /// Meals planned on the week board for this day, not yet eaten (eaten ones are diary entries).
+    private func plannedMeals(_ meal: MealType) -> [MealBoardPlacement] {
+        let key = WeekBoard.dayKey(date)
+        return store.mealBoardPlacements.filter { $0.day == key && $0.meal == meal && store.state(of: $0) != .consumed }
+    }
+
+    /// The day's meals in the order they happened (each where its earliest food is), so the pre- and
+    /// post-workout meals show when the training was.
+    private var orderedMeals: [MealType] {
+        let key = WeekBoard.dayKey(date)
+        let planned = store.mealBoardPlacements.filter { $0.day == key && store.state(of: $0) != .consumed }
+        return MealTiming.orderedMeals(entries: dayEntries, planned: planned)
+    }
 
     private var dayEntries: [FoodEntry] {
         store.entries(on: date).sorted { $0.date < $1.date }
@@ -153,10 +180,14 @@ struct DayView: View {
                 }
             }
 
-            ForEach(MealType.allCases) { meal in
+            ForEach(orderedMeals) { meal in
                 let mealEntries = dayEntries.filter { $0.mealType == meal }
-                if !mealEntries.isEmpty {
+                let planned = plannedMeals(meal)
+                if !mealEntries.isEmpty || !planned.isEmpty {
                     Section {
+                        ForEach(planned) { placement in
+                            PlannedMealRow(placement: placement) { refusing = placement }
+                        }
                         ForEach(mealEntries) { entry in
                             Button {
                                 if loggedRecipe(of: entry) != nil {
@@ -169,6 +200,12 @@ struct DayView: View {
                             }
                             .buttonStyle(.plain)
                             .swipeActions(edge: .leading) {
+                                Button {
+                                    entryToDuplicate = entry
+                                } label: {
+                                    Label("Duplicar", systemImage: "plus.square.on.square")
+                                }
+                                .tint(.green)
                                 if loggedRecipe(of: entry) != nil {
                                     Button("Editar Alimento") { entryToEdit = entry }
                                         .tint(.blue)
@@ -193,7 +230,12 @@ struct DayView: View {
             if !daySupplementLogs.isEmpty {
                 Section {
                     ForEach(daySupplementLogs) { log in
-                        supplementLogRow(log)
+                        Button {
+                            supplementLogToDescribe = log
+                        } label: {
+                            supplementLogRow(log)
+                        }
+                        .buttonStyle(.plain)
                     }
                     .onDelete { offsets in
                         for index in offsets {
@@ -212,7 +254,11 @@ struct DayView: View {
             if !dayWorkouts.isEmpty {
                 Section {
                     ForEach(dayWorkouts) { workout in
-                        workoutRow(workout)
+                        NavigationLink {
+                            WorkoutDetailView(workout: workout)
+                        } label: {
+                            workoutRow(workout)
+                        }
                     }
                 } header: {
                     HStack {
@@ -225,7 +271,8 @@ struct DayView: View {
                 }
             }
 
-            if dayEntries.isEmpty && daySupplementLogs.isEmpty && dayWorkouts.isEmpty {
+            if dayEntries.isEmpty && daySupplementLogs.isEmpty && dayWorkouts.isEmpty
+                && MealType.allCases.allSatisfy({ plannedMeals($0).isEmpty }) {
                 ContentUnavailableView(
                     "Sem registos",
                     systemImage: "fork.knife",
@@ -238,6 +285,9 @@ struct DayView: View {
         .navigationBarTitleDisplayMode(selectedDay == nil ? .automatic : .inline)
         #endif
         .trackScreen(isToday ? "Hoje" : "Dia")
+        .sheet(item: $refusing) { placement in
+            PlacementSubstituteView(placement: placement)
+        }
         .onChange(of: selectedDay?.wrappedValue) {
             Task { await healthKit.refresh(days: daysNeededToCoverDate) }
         }
@@ -333,6 +383,9 @@ struct DayView: View {
         .sheet(item: $entryToEdit) { entry in
             AddEntryView(entryToEdit: entry)
         }
+        .sheet(item: $entryToDuplicate) { entry in
+            AddEntryView(duplicateOf: entry)
+        }
         .sheet(item: $recipeLogToEdit) { entry in
             if let recipe = loggedRecipe(of: entry), let groupID = entry.groupID {
                 NavigationStack {
@@ -375,10 +428,65 @@ struct DayView: View {
                 await healthKit.refresh(days: daysNeededToCoverDate)
             }
         }
+        // A workout not asked about yet — new when the app opens, or on a day browsed back to — asks
+        // whether any supplement was taken.
+        .onChange(of: supplementCandidate.map(WorkoutSupplementPrompts.key), initial: true) { _, _ in askAboutSupplement() }
+        .alert("Suplementação?", isPresented: Binding(get: { supplementQuestion != nil }, set: { if !$0 { supplementQuestion = nil } }), presenting: supplementQuestion) { workout in
+            // Sim saves nothing yet: the answer is recorded when a supplement is logged; cancelling leaves no trace.
+            Button("Sim") {
+                lastAskedWorkout = workout
+                supplementWorkout = workout
+            }
+            Button("Não", role: .cancel) {
+                store.setSupplementAnswer(for: workout, consumed: false)
+                askAboutSupplement()
+            }
+        } message: { workout in
+            Text("\(workout.kind.displayName) às \(workout.startDate.formatted(date: .omitted, time: .shortened)) (\(Int((workout.duration / 60).rounded())) min). Consumiste algum suplemento neste treino?")
+        }
+        // Several activities in a day: when one question is answered, the next one is asked (after the
+        // alert has gone), until every activity has its answer.
+        .onChange(of: supplementQuestion.map(WorkoutSupplementPrompts.key)) { _, key in
+            guard key == nil else { return }
+            Task {
+                try? await Task.sleep(for: .milliseconds(500))
+                askAboutSupplement()
+            }
+        }
+        .sheet(item: $supplementLogToDescribe) { log in
+            SupplementLogDescriptionSheet(log: log)
+        }
+        .sheet(item: $supplementWorkout, onDismiss: {
+            // Cancelled without logging anything: nothing is kept, and the question waits for next time.
+            if let asked = lastAskedWorkout, store.supplementAnswer(for: asked) == nil {
+                skippedSupplementQuestions.insert(WorkoutSupplementPrompts.key(for: asked))
+            }
+            lastAskedWorkout = nil
+            askAboutSupplement()
+        }) { workout in
+            SupplementPickerView(date: workout.startDate, allowsCreating: true, workout: workout)
+        }
         .refreshable {
             Haptics.light()
+            await platform.refresh()
             await healthKit.refresh(days: daysNeededToCoverDate)
         }
+    }
+
+    /// The next workout to ask about: those of the day shown and, on today, the ones of the last 24 h
+    /// (a workout that ended after midnight belongs to yesterday's list).
+    private var supplementCandidate: HealthKitManager.WorkoutSummary? {
+        var workouts = healthKit.workouts(on: date)
+        if isToday, let yesterday = Calendar.current.date(byAdding: .day, value: -1, to: date) {
+            workouts += healthKit.workouts(on: yesterday).filter { $0.startDate > Date.now.addingTimeInterval(-24 * 3600) }
+        }
+        return WorkoutSupplementPrompts.next(in: workouts.filter { !skippedSupplementQuestions.contains(WorkoutSupplementPrompts.key(for: $0)) }, store: store)
+    }
+
+    /// Shows the question when there's a workout to ask about and nothing else is on screen over this one.
+    private func askAboutSupplement() {
+        guard supplementQuestion == nil, supplementWorkout == nil, let workout = supplementCandidate else { return }
+        supplementQuestion = workout
     }
 
     /// Enough days for a Health refresh to include `date`, even when it's further back than
@@ -571,6 +679,9 @@ struct DayView: View {
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                if let notes = log.notes, !notes.isEmpty {
+                    Text(notes).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                }
             }
             Spacer()
             if let supplement, supplement.calories != nil {
@@ -597,6 +708,8 @@ struct DayView: View {
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                WorkoutSupplementBadge(workout: workout)
+                    .font(.caption)
             }
             Spacer()
             if let calories = workout.caloriesBurned {
@@ -648,6 +761,15 @@ struct DayView: View {
 
     private func entryRow(_ entry: FoodEntry) -> some View {
         HStack {
+            #if canImport(UIKit)
+            if let photoID = entry.photoID, let image = PhotoStore.image(photoID) {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 40, height: 40)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+            #endif
             VStack(alignment: .leading) {
                 Text(entry.name)
                 HStack(spacing: 4) {
@@ -664,6 +786,12 @@ struct DayView: View {
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                if let notes = entry.notes, !notes.isEmpty {
+                    Text(notes)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
             }
             Spacer()
             VStack(alignment: .trailing, spacing: 2) {

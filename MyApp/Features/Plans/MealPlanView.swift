@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 /// plans). Each plan and each of its meals is collapsible; a meal's options are linked to recipes
 /// that can be logged straight into the daily log. Plans export/import as self-contained JSON.
 struct MealPlanView: View {
+    @Environment(PlatformSyncManager.self) private var platform
     @Environment(DataStore.self) private var store
 
     @State private var optionToLog: PlanOptionSelection?
@@ -67,6 +68,7 @@ struct MealPlanView: View {
         .onAppear(perform: setInitialExpansion)
         .refreshable {
             Haptics.light()
+            await platform.refresh()
             store.reloadFromDisk()
         }
         .toolbar {

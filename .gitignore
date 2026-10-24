@@ -11,3 +11,4 @@ GoogleService-Info.plist
 # Platform connection per build configuration (template: Config/Supabase.example.plist)
 MyApp/Resources/Config/Supabase-Debug.plist
 MyApp/Resources/Config/Supabase-Release.plist
+MyApp/Resources/Config/Supabase-Staging.plist

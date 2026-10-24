@@ -96,4 +96,11 @@ final class ForegroundNotificationPresenter: NSObject, UNUserNotificationCenterD
         async -> UNNotificationPresentationOptions {
         [.banner, .list, .sound]
     }
+
+    /// A button of a reminder ("Já consumi") pressed on the notification.
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
+        let action = response.actionIdentifier
+        let userInfo = response.notification.request.content.userInfo
+        await MainActor.run { ReminderScheduler.handle(action: action, userInfo: userInfo) }
+    }
 }

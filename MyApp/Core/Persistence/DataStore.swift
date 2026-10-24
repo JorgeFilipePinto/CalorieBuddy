@@ -45,6 +45,11 @@ final class DataStore {
     private(set) var mealPreps: [MealPrep] = []
     private(set) var mealBoardPlacements: [MealBoardPlacement] = []
     private(set) var mealBoardDays: [MealBoardDay] = []
+    private(set) var consultationQuestions: [ConsultationQuestion] = []
+    private(set) var labReports: [LabReport] = []
+    private(set) var otherExams: [OtherExam] = []
+    private(set) var workoutSupplementAnswers: [WorkoutSupplementAnswer] = []
+    private(set) var reminders: [Reminder] = []
     var settings: UserSettings = .default
 
     private(set) var backupTimestamp: Date?
@@ -171,6 +176,7 @@ final class DataStore {
             + database.recipes.compactMap(\.photoID)
             + database.supplements.compactMap(\.photoID)
             + database.progressPhotos.map(\.photoID)
+            + database.entries.compactMap(\.photoID)
             + database.foodItems.flatMap(\.labelPhotoIDs)
             + database.recipes.flatMap(\.labelPhotoIDs)
             + database.supplements.flatMap(\.labelPhotoIDs))
@@ -397,14 +403,15 @@ final class DataStore {
         entries.filter { Calendar.current.isDate($0.date, inSameDayAs: date) }
     }
 
+    /// The day's energy: what was eaten plus the supplements taken (they count towards the day's macros too).
     func totalCalories(on date: Date) -> Int {
-        entries(on: date).reduce(0) { $0 + $1.calories }
+        entries(on: date).reduce(0) { $0 + $1.calories } + totalSupplementCalories(on: date)
     }
 
     /// Distinct calendar days that have at least one entry, most recent first.
     var allDays: [Date] {
         let calendar = Calendar.current
-        let uniqueDays = Set(entries.map { calendar.startOfDay(for: $0.date) })
+        let uniqueDays = Set(entries.map { calendar.startOfDay(for: $0.date) } + supplementLogs.map { calendar.startOfDay(for: $0.date) })
         return uniqueDays.sorted(by: >)
     }
 
@@ -519,6 +526,11 @@ final class DataStore {
         supplementCategories.first { $0.id == id }
     }
 
+    /// The supplement a mirror food stands for (`nil` for any other food).
+    func supplement(mirroredBy food: FoodItem) -> Supplement? {
+        food.supplementID.flatMap { supplement(withID: $0) }
+    }
+
     func supplement(withID id: UUID) -> Supplement? {
         supplements.first { $0.id == id }
     }
@@ -605,6 +617,7 @@ final class DataStore {
 
     func addSupplement(_ supplement: Supplement) {
         supplements.append(supplement)
+        syncMirrorFood(of: supplement)
         persistActive()
     }
 
@@ -638,12 +651,14 @@ final class DataStore {
     func updateSupplement(_ supplement: Supplement) {
         guard let index = supplements.firstIndex(where: { $0.id == supplement.id }) else { return }
         supplements[index] = supplement
+        syncMirrorFood(of: supplement)
         persistActive()
     }
 
     func deleteSupplement(_ supplement: Supplement) {
         supplements.removeAll { $0.id == supplement.id }
         supplementLogs.removeAll { $0.supplementID == supplement.id }
+        removeFoodItems(ids: [supplement.id])
         persistActive()
     }
 
@@ -655,6 +670,14 @@ final class DataStore {
 
     /// Removes an intake (e.g. logged by mistake) and gives its doses back to the stock they were
     /// taken from, if that stock still exists.
+    /// Changes the description of an intake already logged (doses and stock stay as they were).
+    func updateSupplementLogNotes(_ id: UUID, notes: String?) {
+        guard let index = supplementLogs.firstIndex(where: { $0.id == id }) else { return }
+        let trimmed = notes?.trimmingCharacters(in: .whitespacesAndNewlines)
+        supplementLogs[index].notes = trimmed?.isEmpty == false ? String(trimmed!.prefix(1000)) : nil
+        persistActive()
+    }
+
     func deleteSupplementLog(_ log: SupplementLogEntry) {
         supplementLogs.removeAll { $0.id == log.id }
         if let stockID = log.stockID,
@@ -665,12 +688,66 @@ final class DataStore {
         persistActive()
     }
 
+    /// The stock to suggest for a supplement: the one its latest intake came from, as long as it still
+    /// has at least a dose left; otherwise the one with the most left. A stock that has run out is
+    /// never suggested; nil when the supplement has no stock.
+    func preferredStockID(for supplement: Supplement) -> UUID? {
+        let usable = supplement.stocks.filter { $0.remaining > 0 && $0.remaining >= supplement.doseSize }
+        let ids = Set(usable.map(\.id))
+        if let used = supplementLogs.filter({ $0.supplementID == supplement.id }).sorted(by: { $0.date > $1.date })
+            .compactMap(\.stockID).first(where: { ids.contains($0) }) {
+            return used
+        }
+        return (usable.isEmpty ? supplement.stocks : usable).max { $0.remaining < $1.remaining }?.id
+    }
+
+    /// Changes an intake already logged — doses, stock, time, description — and puts the stock right:
+    /// what the intake had taken goes back to the stock it came from, and the new amount comes off the
+    /// stock now chosen. Returns true when that stock is now at or below the low-stock threshold.
+    @discardableResult
+    func updateSupplementLog(_ id: UUID, quantity: Double, stockID: UUID?, date: Date, notes: String?) -> Bool {
+        guard let logIndex = supplementLogs.firstIndex(where: { $0.id == id }),
+              let supplementIndex = supplements.firstIndex(where: { $0.id == supplementLogs[logIndex].supplementID }) else { return false }
+        let old = supplementLogs[logIndex]
+        let doseSize = supplements[supplementIndex].doseSize
+        // Give back what it had taken…
+        if let oldStock = old.stockID, let index = supplements[supplementIndex].stocks.firstIndex(where: { $0.id == oldStock }) {
+            supplements[supplementIndex].stocks[index].remaining += old.quantity * doseSize
+        }
+        // …and take the new amount from the stock now chosen.
+        var isLowStock = false
+        var locationName = "stock"
+        if let stockID, let index = supplements[supplementIndex].stocks.firstIndex(where: { $0.id == stockID }) {
+            supplements[supplementIndex].stocks[index].remaining -= quantity * doseSize
+            if let threshold = supplements[supplementIndex].lowStockThreshold, supplements[supplementIndex].stocks[index].remaining <= threshold {
+                isLowStock = true
+                locationName = stockLocation(withID: supplements[supplementIndex].stocks[index].locationID)?.name ?? "stock"
+            }
+        }
+        let trimmed = notes?.trimmingCharacters(in: .whitespacesAndNewlines)
+        supplementLogs[logIndex].quantity = quantity
+        supplementLogs[logIndex].stockID = stockID
+        supplementLogs[logIndex].date = date
+        supplementLogs[logIndex].notes = trimmed?.isEmpty == false ? String(trimmed!.prefix(1000)) : nil
+        persistActive()
+        if isLowStock { sendLowStockNotification(supplementName: supplements[supplementIndex].name, locationName: locationName) }
+        return isLowStock
+    }
+
     /// Logs `quantity` doses of `supplement`, decrementing `stockID`'s remaining amount if given.
     /// Returns `true` if that stock has now dropped to or below the supplement's low-stock
     /// threshold, in which case a local notification is also fired.
     @discardableResult
-    func logSupplement(_ supplement: Supplement, stockID: UUID?, quantity: Double, date: Date) -> Bool {
-        supplementLogs.append(SupplementLogEntry(supplementID: supplement.id, stockID: stockID, quantity: quantity, date: date))
+    func logSupplement(_ supplement: Supplement, stockID: UUID?, quantity: Double, date: Date,
+                       notes: String? = nil, workout: HealthKitManager.WorkoutSummary? = nil) -> Bool {
+        let trimmedNotes = notes?.trimmingCharacters(in: .whitespacesAndNewlines)
+        supplementLogs.append(SupplementLogEntry(
+            supplementID: supplement.id, stockID: stockID, quantity: quantity, date: date,
+            notes: trimmedNotes?.isEmpty == false ? String(trimmedNotes!.prefix(1000)) : nil,
+            workoutKey: workout.map(WorkoutSupplementPrompts.key)
+        ))
+        // Taking something for a workout answers its question: com suplementação.
+        if let workout { setSupplementAnswer(for: workout, consumed: true, persist: false) }
 
         var isLowStock = false
         var lowStockLocationName = ""
@@ -707,6 +784,99 @@ final class DataStore {
         }
     }
 
+    // MARK: - Supplements used as food
+
+    /// The recipes that use `supplement`'s mirror food — taking it out of the catalog would pull it
+    /// out of them, so the editor asks first.
+    func recipes(usingMirrorOf supplement: Supplement) -> [Recipe] {
+        recipes.filter { recipe in recipe.items.contains { $0.foodItemID == supplement.id } }
+    }
+
+    /// The catalog food that stands for `supplement`: same id, the supplement's label, and whatever it
+    /// doesn't own (category, favourite, cooking change…) kept from `existing`. No barcodes (scanning
+    /// stays with the supplement) and no photo (the dashboard's mirror has none either).
+    private func mirrorFood(for supplement: Supplement, existing: FoodItem?) -> FoodItem {
+        var food = existing ?? FoodItem(id: supplement.id, name: supplement.name, calories: 0, createdAt: supplement.createdAt)
+        food.id = supplement.id
+        food.supplementID = supplement.id
+        food.name = supplement.name
+        food.unit = supplement.unit
+        food.doseSize = supplement.doseSize
+        food.nutritionBasis = supplement.nutritionBasis
+        food.calories = supplement.calories ?? 0
+        food.protein = supplement.protein
+        food.carbs = supplement.carbs
+        food.fat = supplement.fat
+        food.saturatedFat = supplement.saturatedFat
+        food.sugars = supplement.sugars
+        food.fiber = supplement.fiber
+        food.salt = supplement.salt
+        food.micronutrients = supplement.micronutrients
+        food.minerals = []
+        food.vitamins = []
+        food.barcodes = []
+        food.photoID = nil
+        food.labelPhotoIDs = []
+        return food
+    }
+
+    /// Keeps `supplement`'s mirror food in step: one that is used as food has it (and what was logged
+    /// from it follows, like any food edit); one that isn't, doesn't.
+    private func syncMirrorFood(of supplement: Supplement) {
+        let index = foodItems.firstIndex { $0.id == supplement.id }
+        if supplement.usableAsFood {
+            let existing = index.map { foodItems[$0] }.flatMap { $0.supplementID == nil ? nil : $0 }
+            let mirror = mirrorFood(for: supplement, existing: existing)
+            if let index {
+                foodItems[index] = mirror
+            } else {
+                foodItems.append(mirror)
+            }
+            refreshEntries(linkedTo: mirror)
+        } else if let index, foodItems[index].supplementID != nil {
+            removeFoodItems(ids: [supplement.id])
+        }
+    }
+
+    /// A diary entry logged from a supplement's mirror food takes its amount off that supplement's
+    /// stock — the one with most left, never below 0 — and remembers it, so deleting the entry gives
+    /// it back. (Not a `SupplementLogEntry`: the day's totals already count the food entry.)
+    private func takeSupplementStock(for entry: inout FoodEntry) {
+        entry.supplementStockID = nil
+        entry.supplementUsed = nil
+        guard let foodID = entry.foodItemID, let quantity = entry.quantity, quantity > 0,
+              let supplementID = foodItems.first(where: { $0.id == foodID })?.supplementID,
+              let supplementIndex = supplements.firstIndex(where: { $0.id == supplementID }) else { return }
+        let wanted = quantity * supplements[supplementIndex].doseSize
+        var best: Int?
+        for index in supplements[supplementIndex].stocks.indices where supplements[supplementIndex].stocks[index].remaining > 0 {
+            if best == nil || supplements[supplementIndex].stocks[index].remaining > supplements[supplementIndex].stocks[best!].remaining {
+                best = index
+            }
+        }
+        guard wanted > 0, let stockIndex = best else { return }
+        let used = min(wanted, supplements[supplementIndex].stocks[stockIndex].remaining)
+        supplements[supplementIndex].stocks[stockIndex].remaining -= used
+        entry.supplementStockID = supplements[supplementIndex].stocks[stockIndex].id
+        entry.supplementUsed = used
+        if let threshold = supplements[supplementIndex].lowStockThreshold,
+           supplements[supplementIndex].stocks[stockIndex].remaining <= threshold {
+            let locationID = supplements[supplementIndex].stocks[stockIndex].locationID
+            sendLowStockNotification(supplementName: supplements[supplementIndex].name,
+                                     locationName: stockLocation(withID: locationID)?.name ?? "stock")
+        }
+    }
+
+    /// Gives back what `entry` took from its supplement's stock (nothing if it took none, or that
+    /// stock is gone). The mirror food shares the supplement's id, so `foodItemID` finds it.
+    private func giveBackSupplementStock(of entry: FoodEntry) {
+        guard let stockID = entry.supplementStockID, let used = entry.supplementUsed, used > 0,
+              let supplementID = entry.foodItemID,
+              let supplementIndex = supplements.firstIndex(where: { $0.id == supplementID }),
+              let stockIndex = supplements[supplementIndex].stocks.firstIndex(where: { $0.id == stockID }) else { return }
+        supplements[supplementIndex].stocks[stockIndex].remaining += used
+    }
+
     // MARK: - Mutations (auto-persisted to the active database)
 
     func addEntry(_ entry: FoodEntry) {
@@ -714,13 +884,26 @@ final class DataStore {
         persistActive()
     }
 
+    /// Adds a copy of a logged entry (a new one of its own); a supplement-food takes its own stock.
+    func addDuplicatedEntry(_ entry: FoodEntry) {
+        var copy = entry
+        takeSupplementStock(for: &copy)
+        entries.append(copy)
+        persistActive()
+    }
+
     func updateEntry(_ entry: FoodEntry) {
         guard let index = entries.firstIndex(where: { $0.id == entry.id }) else { return }
-        entries[index] = entry
+        // A supplement's stock follows the amount: give the old amount back, take the new one.
+        giveBackSupplementStock(of: entries[index])
+        var updated = entry
+        takeSupplementStock(for: &updated)
+        entries[index] = updated
         persistActive()
     }
 
     func deleteEntry(_ entry: FoodEntry) {
+        if let stored = entries.first(where: { $0.id == entry.id }) { giveBackSupplementStock(of: stored) }
         entries.removeAll { $0.id == entry.id }
         persistActive()
     }
@@ -732,7 +915,7 @@ final class DataStore {
 
     /// Logs several catalog foods at once (`items`: food + doses), in one save.
     func logFoodItems(_ items: [RecipeItem], mealType: MealType, date: Date) {
-        let newEntries: [FoodEntry] = items.compactMap { line in
+        var newEntries: [FoodEntry] = items.compactMap { line in
             guard line.quantity > 0, let item = foodItems.first(where: { $0.id == line.foodItemID }) else { return nil }
             var entry = FoodEntry(name: item.name, nutrition: item.nutrition(quantity: line.quantity), mealType: mealType,
                                   date: date, barcode: item.barcodes.first)
@@ -741,6 +924,7 @@ final class DataStore {
             return entry
         }
         guard !newEntries.isEmpty else { return }
+        for index in newEntries.indices { takeSupplementStock(for: &newEntries[index]) }
         entries.append(contentsOf: newEntries)
         persistActive()
     }
@@ -756,13 +940,15 @@ final class DataStore {
         )
         entry.foodItemID = item.id
         entry.quantity = quantity
+        takeSupplementStock(for: &entry)
         addEntry(entry)
     }
 
     /// Logs a recipe: one entry per ingredient, tagged with a shared group and linked to the
     /// recipe. `items` are the amounts actually eaten (the recipe's own amounts are only the
     /// defaults); an ingredient at 0 is left out.
-    func logRecipe(_ recipe: Recipe, items: [RecipeItem]? = nil, mealType: MealType, date: Date) {
+    @discardableResult
+    func logRecipe(_ recipe: Recipe, items: [RecipeItem]? = nil, mealType: MealType, date: Date) -> UUID? {
         logFoods((items ?? recipe.items).filter { $0.quantity > 0 }, groupName: recipe.name, mealType: mealType,
                  date: date, recipeID: recipe.id)
     }
@@ -777,6 +963,7 @@ final class DataStore {
     func relogRecipe(_ recipe: Recipe, group groupID: UUID, items: [RecipeItem], mealType: MealType, date: Date) {
         let old = entries(inGroup: groupID)
         guard !old.isEmpty else { return }
+        old.forEach(giveBackSupplementStock)
         var replaced = linkedEntries(for: items.filter { $0.quantity > 0 }, groupID: groupID, groupName: recipe.name,
                                      mealType: mealType, date: date, recipeID: recipe.id)
         for index in replaced.indices {
@@ -784,6 +971,7 @@ final class DataStore {
                 replaced[index].id = previous.id
                 replaced[index].barcode = previous.barcode
             }
+            takeSupplementStock(for: &replaced[index])
         }
         entries.removeAll { $0.groupID == groupID }
         entries.append(contentsOf: replaced)
@@ -794,12 +982,17 @@ final class DataStore {
     /// a shared group named `groupName`.
     /// `recipeID`: the recipe they were logged from, so the day can reopen its amounts and a
     /// rename follows.
-    func logFoods(_ items: [RecipeItem], groupName: String, mealType: MealType, date: Date, recipeID: UUID? = nil) {
-        let newEntries = linkedEntries(for: items, groupID: UUID(), groupName: groupName, mealType: mealType,
+    /// Returns the new group's id (`nil` when nothing was logged).
+    @discardableResult
+    func logFoods(_ items: [RecipeItem], groupName: String, mealType: MealType, date: Date, recipeID: UUID? = nil) -> UUID? {
+        let groupID = UUID()
+        var newEntries = linkedEntries(for: items, groupID: groupID, groupName: groupName, mealType: mealType,
                                        date: date, recipeID: recipeID)
-        guard !newEntries.isEmpty else { return }
+        guard !newEntries.isEmpty else { return nil }
+        for index in newEntries.indices { takeSupplementStock(for: &newEntries[index]) }
         entries.append(contentsOf: newEntries)
         persistActive()
+        return groupID
     }
 
     /// One entry per catalog food of `items`, linked to its food (and recipe).
@@ -836,6 +1029,8 @@ final class DataStore {
             updated.foodItemID = old.foodItemID
             updated.quantity = quantity
             updated.recipeID = old.recipeID
+            updated.supplementStockID = old.supplementStockID
+            updated.supplementUsed = old.supplementUsed
             entries[index] = updated
         }
     }
@@ -891,6 +1086,32 @@ final class DataStore {
         }
         addFoodItem(newItem)
         return newItem
+    }
+
+    /// The catalog foods of an AI answer (`catalogFood(for:)` each, in order). When the answer is one food,
+    /// the photos taken for the import — the article's and its label's — stay with it, so a food created
+    /// from a photographed label is born with both. With several foods the photos have no obvious owner
+    /// and are not kept.
+    @discardableResult
+    func catalogFoods(for payloads: [FoodImportPayload], photos: ImportedPhotos? = nil) -> [FoodItem] {
+        let foods = payloads.map { catalogFood(for: $0) }
+        if let photos, !photos.isEmpty, payloads.count == 1, let food = foods.first {
+            attach(photos, to: food)
+        }
+        return foods
+    }
+
+    /// Gives a food the photos taken while importing it: the article's as its photo when it has none yet,
+    /// and the label's added to its nutrition-label photos (uploaded on the next sync like any photo).
+    func attach(_ photos: ImportedPhotos, to food: FoodItem) {
+        guard var current = foodItems.first(where: { $0.id == food.id }) else { return }
+        if current.photoID == nil, let data = photos.product {
+            current.photoID = PhotoStore.save(jpeg: data)
+        }
+        if let data = photos.label, let id = PhotoStore.save(jpeg: data) {
+            current.labelPhotoIDs.append(id)
+        }
+        updateFoodItem(current)
     }
 
     /// The food category called `name` (ignoring case and accents), if there is one.
@@ -984,6 +1205,15 @@ final class DataStore {
 
     /// Deletes several foods at once (and takes them out of every recipe), in one save.
     func deleteFoodItems(withIDs ids: Set<UUID>) {
+        // A supplement's mirror food goes with the supplement (or when it stops being used as food).
+        let ids = ids.filter { id in foodItems.first(where: { $0.id == id })?.supplementID == nil }
+        guard !ids.isEmpty else { return }
+        removeFoodItems(ids: ids)
+        persistActive()
+    }
+
+    /// Takes foods out of the catalog, every recipe and the food stock, without saving (callers do).
+    private func removeFoodItems(ids: Set<UUID>) {
         guard !ids.isEmpty else { return }
         foodItems.removeAll { ids.contains($0.id) }
         for index in recipes.indices {
@@ -994,7 +1224,6 @@ final class DataStore {
         for index in foodItems.indices where foodItems[index].baseFoodID.map(ids.contains) == true {
             foodItems[index].baseFoodID = nil
         }
-        persistActive()
     }
 
     /// Moves several foods to a category (`nil` = none), each raw food with its preparations, in one save.
@@ -1137,7 +1366,203 @@ final class DataStore {
         persistActive()
     }
 
+    // MARK: Week board on the day's log
+
+    /// Where a planned meal stands: eaten only while its diary group is still there.
+    func state(of placement: MealBoardPlacement) -> PlacementState {
+        if placement.status == .consumed, let group = placement.loggedGroupID, entries.contains(where: { $0.groupID == group }) {
+            return .consumed
+        }
+        if placement.status == .refused { return .refused }
+        return placement.day < WeekBoard.dayKey(.now) ? .missed : .planned
+    }
+
+    /// "Comi": logs the planned recipe with the board's amounts and marks it eaten.
+    @discardableResult
+    func confirmPlacement(_ placement: MealBoardPlacement) -> Bool {
+        guard let recipe = recipe(withID: placement.recipeID),
+              let index = mealBoardPlacements.firstIndex(where: { $0.id == placement.id }) else { return false }
+        let items = recipe.items.map { RecipeItem(id: $0.id, foodItemID: $0.foodItemID, quantity: placement.doses(of: $0)) }
+        guard let group = logRecipe(recipe, items: items, mealType: placement.meal, date: WeekBoard.logDate(for: placement)) else { return false }
+        mealBoardPlacements[index].status = .consumed
+        mealBoardPlacements[index].loggedGroupID = group
+        mealBoardPlacements[index].replacementRecipeID = nil
+        persistActive()
+        return true
+    }
+
+    /// Refused, with what was eaten instead (already logged as `group`), if anything.
+    func refusePlacement(_ placement: MealBoardPlacement, replacedBy recipeID: UUID? = nil, group: UUID? = nil) {
+        guard let index = mealBoardPlacements.firstIndex(where: { $0.id == placement.id }) else { return }
+        mealBoardPlacements[index].status = .refused
+        mealBoardPlacements[index].loggedGroupID = group
+        mealBoardPlacements[index].replacementRecipeID = recipeID
+        persistActive()
+    }
+
+    /// Back to "to confirm"; whatever was logged stays in the diary.
+    func resetPlacement(_ placement: MealBoardPlacement) {
+        guard let index = mealBoardPlacements.firstIndex(where: { $0.id == placement.id }) else { return }
+        mealBoardPlacements[index].status = nil
+        mealBoardPlacements[index].loggedGroupID = nil
+        mealBoardPlacements[index].replacementRecipeID = nil
+        persistActive()
+    }
+
     /// Training or rest for a board day, as chosen there.
+    // MARK: Supplements and activities
+
+    /// The answer given for this workout (com / sem suplementação), if any.
+    func supplementAnswer(for workout: HealthKitManager.WorkoutSummary) -> WorkoutSupplementAnswer? {
+        let key = WorkoutSupplementPrompts.key(for: workout)
+        return workoutSupplementAnswers.first { $0.workoutKey == key }
+    }
+
+    /// The supplements taken for a workout, in time order.
+    func supplementLogs(for workout: HealthKitManager.WorkoutSummary) -> [SupplementLogEntry] {
+        let key = WorkoutSupplementPrompts.key(for: workout)
+        return supplementLogs.filter { $0.workoutKey == key }.sorted { $0.date < $1.date }
+    }
+
+    /// Records com / sem suplementação for a workout (replacing the earlier answer).
+    func setSupplementAnswer(for workout: HealthKitManager.WorkoutSummary, consumed: Bool, persist: Bool = true) {
+        let key = WorkoutSupplementPrompts.key(for: workout)
+        if let index = workoutSupplementAnswers.firstIndex(where: { $0.workoutKey == key }) {
+            guard workoutSupplementAnswers[index].consumed != consumed else { return }
+            workoutSupplementAnswers[index].consumed = consumed
+            workoutSupplementAnswers[index].answeredAt = Date()
+        } else {
+            workoutSupplementAnswers.append(WorkoutSupplementAnswer(
+                id: WorkoutSupplementPrompts.answerID(forKey: key), workoutKey: key,
+                startedAt: workout.startDate, kind: workout.kind.displayName, consumed: consumed))
+        }
+        if persist { persistActive() }
+    }
+
+    // MARK: Reminders
+
+    /// Adds or replaces a reminder; confirmations of windows that no longer exist are dropped.
+    func saveReminder(_ reminder: Reminder) {
+        var reminder = reminder
+        let windowIDs = Set(reminder.windows.map(\.id.uuidString))
+        reminder.doneKeys = reminder.doneKeys.filter { windowIDs.contains(String($0.split(separator: "|").last ?? "")) }
+        if let index = reminders.firstIndex(where: { $0.id == reminder.id }) {
+            reminders[index] = reminder
+        } else {
+            reminders.append(reminder)
+        }
+        persistActive()
+    }
+
+    func deleteReminder(id: UUID) {
+        reminders.removeAll { $0.id == id }
+        persistActive()
+    }
+
+    func setReminderEnabled(id: UUID, _ enabled: Bool) {
+        guard let index = reminders.firstIndex(where: { $0.id == id }), reminders[index].isEnabled != enabled else { return }
+        reminders[index].isEnabled = enabled
+        persistActive()
+    }
+
+    /// "Já consumi": that window of the reminder doesn't fire again on `day` ("yyyy-MM-dd").
+    func confirmReminder(id: UUID, window: UUID, day: String) {
+        guard let index = reminders.firstIndex(where: { $0.id == id }),
+              !reminders[index].isDone(day: day, window: window) else { return }
+        reminders[index].doneKeys.append(Reminder.doneKey(day: day, window: window))
+        // Only the last fortnight is kept.
+        let cutoff = ReminderScheduler.dayString(Calendar.current.date(byAdding: .day, value: -14, to: .now) ?? .now)
+        reminders[index].doneKeys.removeAll { String($0.prefix(10)) < cutoff }
+        persistActive()
+    }
+
+    /// Takes the confirmation back.
+    func unconfirmReminder(id: UUID, window: UUID, day: String) {
+        guard let index = reminders.firstIndex(where: { $0.id == id }) else { return }
+        reminders[index].doneKeys.removeAll { $0 == Reminder.doneKey(day: day, window: window) }
+        persistActive()
+    }
+
+    // MARK: Exams
+
+    /// Clinical analyses, newest first.
+    var sortedLabReports: [LabReport] {
+        labReports.sorted { $0.performedOn > $1.performedOn }
+    }
+
+    /// Other exams, the most recently looked at (or requested) first.
+    var sortedOtherExams: [OtherExam] {
+        otherExams.sorted { $0.sortDay > $1.sortDay }
+    }
+
+    /// Adds or replaces an analysis. Documents the previous version had and this one doesn't leave the iPhone.
+    func saveLabReport(_ report: LabReport) {
+        if let index = labReports.firstIndex(where: { $0.id == report.id }) {
+            dropFiles(labReports[index].files, keeping: report.files)
+            labReports[index] = report
+        } else {
+            labReports.append(report)
+        }
+        persistActive()
+    }
+
+    func deleteLabReport(_ report: LabReport) {
+        report.files.forEach { ExamFileStore.remove($0.path) }
+        labReports.removeAll { $0.id == report.id }
+        persistActive()
+    }
+
+    func saveOtherExam(_ exam: OtherExam) {
+        if let index = otherExams.firstIndex(where: { $0.id == exam.id }) {
+            dropFiles(otherExams[index].files, keeping: exam.files)
+            otherExams[index] = exam
+        } else {
+            otherExams.append(exam)
+        }
+        persistActive()
+    }
+
+    func deleteOtherExam(_ exam: OtherExam) {
+        exam.files.forEach { ExamFileStore.remove($0.path) }
+        otherExams.removeAll { $0.id == exam.id }
+        persistActive()
+    }
+
+    private func dropFiles(_ before: [ExamFile], keeping after: [ExamFile]) {
+        let kept = Set(after.map(\.path))
+        for file in before where !kept.contains(file.path) { ExamFileStore.remove(file.path) }
+    }
+
+    // MARK: Questions for the appointment
+
+    /// Still to ask, oldest first.
+    var pendingConsultationQuestions: [ConsultationQuestion] {
+        consultationQuestions.filter { !$0.isAnswered }.sorted { $0.createdAt < $1.createdAt }
+    }
+
+    /// Already answered at an appointment, latest first.
+    var answeredConsultationQuestions: [ConsultationQuestion] {
+        consultationQuestions.filter(\.isAnswered).sorted { ($0.answeredAt ?? .distantPast) > ($1.answeredAt ?? .distantPast) }
+    }
+
+    func addConsultationQuestion(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        consultationQuestions.append(ConsultationQuestion(text: String(trimmed.prefix(500))))
+        persistActive()
+    }
+
+    func updateConsultationQuestion(_ question: ConsultationQuestion) {
+        guard let index = consultationQuestions.firstIndex(where: { $0.id == question.id }) else { return }
+        consultationQuestions[index] = question
+        persistActive()
+    }
+
+    func deleteConsultationQuestions(withIDs ids: Set<UUID>) {
+        consultationQuestions.removeAll { ids.contains($0.id) }
+        persistActive()
+    }
+
     func boardDayType(for day: String) -> DayType? {
         mealBoardDays.first { $0.day == day }?.dayType
     }
@@ -1490,6 +1915,11 @@ final class DataStore {
         mealPreps = database.mealPreps
         mealBoardPlacements = database.mealBoardPlacements
         mealBoardDays = database.mealBoardDays
+        consultationQuestions = database.consultationQuestions
+        labReports = database.labReports
+        otherExams = database.otherExams
+        workoutSupplementAnswers = database.workoutSupplementAnswers
+        reminders = database.reminders
     }
 
     /// Re-reads the active database file from disk and updates in-memory state to match it.
@@ -1525,7 +1955,12 @@ final class DataStore {
             cookingYields: cookingYields,
             mealPreps: mealPreps,
             mealBoardPlacements: mealBoardPlacements,
-            mealBoardDays: mealBoardDays
+            mealBoardDays: mealBoardDays,
+            consultationQuestions: consultationQuestions,
+            labReports: labReports,
+            otherExams: otherExams,
+            workoutSupplementAnswers: workoutSupplementAnswers,
+            reminders: reminders
         )
     }
 
@@ -1633,6 +2068,11 @@ final class DataStore {
         mealPreps = database.mealPreps
         mealBoardPlacements = database.mealBoardPlacements
         mealBoardDays = database.mealBoardDays
+        consultationQuestions = database.consultationQuestions
+        labReports = database.labReports
+        otherExams = database.otherExams
+        workoutSupplementAnswers = database.workoutSupplementAnswers
+        reminders = database.reminders
         persistActive(countingChange: false)
     }
 
@@ -1682,6 +2122,11 @@ final class DataStore {
         mealPreps = database.mealPreps
         mealBoardPlacements = database.mealBoardPlacements
         mealBoardDays = database.mealBoardDays
+        consultationQuestions = database.consultationQuestions
+        labReports = database.labReports
+        otherExams = database.otherExams
+        workoutSupplementAnswers = database.workoutSupplementAnswers
+        reminders = database.reminders
         linkUnlinkedDiaryEntries()
         moveMealPlansToMealStages()
         persistActive(countingChange: false)
@@ -1731,6 +2176,11 @@ final class DataStore {
         mealPreps = restoredDatabase.mealPreps
         mealBoardPlacements = restoredDatabase.mealBoardPlacements
         mealBoardDays = restoredDatabase.mealBoardDays
+        consultationQuestions = restoredDatabase.consultationQuestions
+        labReports = restoredDatabase.labReports
+        otherExams = restoredDatabase.otherExams
+        workoutSupplementAnswers = restoredDatabase.workoutSupplementAnswers
+        reminders = restoredDatabase.reminders
         persistActive(countingChange: false)
         refreshBackupTimestamp()
     }
@@ -1767,6 +2217,11 @@ final class DataStore {
         mealPreps = []
         mealBoardPlacements = []
         mealBoardDays = []
+        consultationQuestions = []
+        labReports = []
+        otherExams = []
+        workoutSupplementAnswers = []
+        reminders = []
         settings = .default
         try? fileManager.removeItem(at: backupURL)
         PhotoStore.deleteAll()

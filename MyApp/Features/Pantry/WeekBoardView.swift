@@ -18,7 +18,12 @@ struct WeekBoardView: View {
     private var dayKey: String { WeekBoard.dayKey(selectedDay) }
 
     private func dayType(for date: Date) -> DayType {
-        store.boardDayType(for: WeekBoard.dayKey(date)) ?? (healthKit.workouts(on: date).isEmpty ? .rest : .training)
+        MealTiming.dayType(hasWorkout: !healthKit.workouts(on: date).isEmpty, chosen: store.boardDayType(for: WeekBoard.dayKey(date)))
+    }
+
+    /// When the day's first workout was, to place the pre-/post-workout meals.
+    private func workoutSpan(for date: Date) -> MealTiming.Span? {
+        healthKit.workouts(on: date).min { $0.startDate < $1.startDate }.map { MealTiming.Span(startDate: $0.startDate, duration: $0.duration) }
     }
 
     private func targets(for date: Date) -> NutritionTargets? {
@@ -58,7 +63,7 @@ struct WeekBoardView: View {
             }
         }
         .sheet(item: $addingTo) { meal in
-            BoardRecipePickerView(meal: meal, suggested: store.boardMealTarget(day: selectedDay, meal: meal, dayType: dayType(for: selectedDay))?.suggestedRecipeIDs ?? []) { recipe in
+            BoardRecipePickerView(meal: meal, suggested: store.boardMealTarget(day: selectedDay, meal: meal, dayType: dayType(for: selectedDay), workout: workoutSpan(for: selectedDay))?.suggestedRecipeIDs ?? []) { recipe in
                 store.placeRecipe(recipe, day: dayKey, meal: meal)
                 Haptics.light()
             }
@@ -161,6 +166,7 @@ struct WeekBoardView: View {
                 }
             }
             .pickerStyle(.segmented)
+            .disabled(!healthKit.workouts(on: selectedDay).isEmpty)
             TotalRow(label: "Calorias", value: totals.calories, target: targets.map { Double($0.kcal) }, unit: "kcal")
             TotalRow(label: "Proteína", value: totals.protein, target: targets.map { Double($0.proteinG) }, unit: "g")
             TotalRow(label: "Hidratos", value: totals.carbs, target: targets.map { Double($0.carbsG) }, unit: "g")
@@ -180,7 +186,7 @@ struct WeekBoardView: View {
                 } else {
                     Text("Sem plano nutricional para este dia.")
                 }
-                Text("Um dia com treino registado começa como Treino.")
+                Text("Um dia com treino registado conta sempre como Treino; a hora do treino define quais são as refeições pré e pós-treino.")
             }
         }
     }
@@ -188,7 +194,7 @@ struct WeekBoardView: View {
     // MARK: Meals
 
     private func mealSection(_ meal: MealType) -> some View {
-        let target = store.boardMealTarget(day: selectedDay, meal: meal, dayType: dayType(for: selectedDay))
+        let target = store.boardMealTarget(day: selectedDay, meal: meal, dayType: dayType(for: selectedDay), workout: workoutSpan(for: selectedDay))
         let items = store.placements(day: dayKey, meal: meal)
         let totals = store.boardTotals(day: dayKey, meal: meal)
         return Section {
@@ -232,9 +238,13 @@ struct WeekBoardView: View {
                                 .accessibilityLabel("Sugerida pelo plano alimentar")
                         }
                         Text(recipe?.name ?? "Receita apagada")
+                        if let time = placement.time {
+                            Text(time).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                        }
                     }
                     Text("\(Int(totals.calories.rounded())) kcal · P \(Int(totals.protein.rounded())) · C \(Int(totals.carbs.rounded())) · G \(Int(totals.fat.rounded()))"
-                         + (recipe.map { placement.isAdjusted(from: $0) } == true ? " · ajustada" : ""))
+                         + (recipe.map { placement.isAdjusted(from: $0) } == true ? " · ajustada" : "")
+                         + stateLabel(placement))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -277,7 +287,17 @@ struct WeekBoardView: View {
         }
     }
 
+    private func stateLabel(_ placement: MealBoardPlacement) -> String {
+        switch store.state(of: placement) {
+        case .consumed: return " · comida ✓"
+        case .refused: return " · recusada"
+        case .missed: return " · não consumida"
+        case .planned: return ""
+        }
+    }
+
     /// A placed recipe dropped on a meal (or on a day: same meal there). Recipes are dragged by id.
+    @discardableResult
     private func moveDropped(_ ids: [String], to date: Date, meal: MealType?) -> Bool {
         var moved = false
         for id in ids {
@@ -445,6 +465,21 @@ private struct BoardPlacementEditorView: View {
                         Text(meal.displayName).tag(meal)
                     }
                 }
+                Toggle("Lembrar à Hora", isOn: Binding(
+                    get: { placement.time != nil },
+                    set: { on in
+                        placement.time = on ? (placement.time ?? WeekBoard.timeString(WeekBoard.logDate(for: placement))) : nil
+                        save()
+                    }
+                ))
+                if placement.time != nil {
+                    DatePicker("Hora", selection: Binding(
+                        get: { WeekBoard.plannedDate(of: placement) ?? .now },
+                        set: { placement.time = WeekBoard.timeString($0); save() }
+                    ), displayedComponents: .hourAndMinute)
+                }
+            } footer: {
+                Text("À hora marcada aparece na Dynamic Island e no ecrã bloqueado para confirmares se comeste.")
             }
 
             if let recipe {

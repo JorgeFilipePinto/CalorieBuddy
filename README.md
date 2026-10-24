@@ -6,32 +6,34 @@ A app é **offline-first**: tudo é guardado localmente num ficheiro JSON. Opcio
 
 ## Funcionalidades
 
-- **Diário**: 7 formas de registar:
-  - manual;
-  - scanner de código de barras;
-  - do catálogo;
-  - do plano alimentar;
-  - receita;
-  - suplemento;
-  - JSON gerado por IA.
-
-  Os totais de kcal e macros são comparados com os objetivos do plano em vigor.
-- **Objetivos por tipo de dia**: planos nutricionais com data de início e metas diferentes para dias de treino e de descanso. Um dia com treino na app Saúde usa as metas de treino.
-- **Plano alimentar**: refeições com opções ligadas a receitas. Ao registar uma opção, os alimentos podem ser trocados por equivalentes do mesmo macro dominante e as quantidades ajustadas.
+- **Diário**: registo manual, por scanner de código de barras, do catálogo (vários alimentos de uma vez), do plano alimentar, de receitas, de suplementos, de refeições esporádicas (foto, descrição e estimativa por IA) ou por JSON gerado por IA.
+  - 8 refeições (pequeno-almoço, meio da manhã, pré-treino, pós-treino, almoço, lanche, jantar, ceia), listadas pela hora a que aconteceram;
+  - duplicar um alimento para outra refeição;
+  - totais de kcal, macros e rótulo completo (açúcares, saturados, fibra, sal, micronutrientes) comparados com os objetivos do plano.
+- **Planos nutricionais**: metas por tipo de dia (treino/descanso), data de início e fim, prioridade (um plano temporário ganha ao normal), divisão por refeição com janelas horárias e importação por JSON/IA. Um treino detetado torna o dia de treino e ajusta as refeições pré e pós-treino à hora do treino.
+- **Plano alimentar e Quadro Semanal**: refeições ligadas a receitas, com troca por equivalentes; quadro de segunda a domingo onde se arrastam receitas, com totais face ao plano, confirmação "Comi"/"Recusar" e Live Activity com botões para as refeições com hora.
 - **Biblioteca**:
-  - catálogo de alimentos (por 100 g/ml ou por dose, minerais e vitaminas, vários códigos de barras);
-  - receitas;
-  - lojas e preços (com promoções), para estimar o custo por dose ou receita;
-  - suplementos com stock por local e notificação de stock baixo.
+  - catálogo de alimentos em categorias e subcategorias, com rótulo completo, fotos, vários códigos de barras e preparações (cru, cozido, grelhado…);
+  - receitas com quantidades por ingrediente e totais;
+  - lojas e preços (com promoções);
+  - suplementos com stock por local, doses, rótulo completo, notificação de stock baixo e opção de os usar como alimento;
+  - importação por IA (fotos do alimento e do rótulo, talões de compras).
+- **Despensa e marmitas**: stock de comida por local com validades e avisos, referências de rendimento na cozedura, planeamento de marmitas com lista de compras.
+- **Balança Bluetooth**: liga à balança de cozinha **Prozis Bit Scale** (Alimentos → Balança) com gauge circular de 0 a 2 kg, tara acumulada (vermelho) e peso novo (verde), long press na Tara para repor a zero, gauge da bateria, e botão para usar o peso ao registar alimentos.
 - **Saúde e treino** (HealthKit):
-  - peso, massa gorda, IMC, água, café, sono e calorias;
-  - gráfico de evolução multi-métrica;
-  - **recordes pessoais** por distância, com previsões para Ironman 70.3 e Ironman (fórmula de Riegel).
+  - peso, massa gorda, massa magra, IMC, cintura, água, café, sono, calorias e treinos;
+  - gráficos de evolução e previsões; **recordes pessoais** por distância com previsões para Ironman 70.3 e Ironman (Riegel);
+  - **Consulta**: perguntas guardadas, peso, bioimpedância e medidas, gravadas onde pertencem;
+  - **Exames**: análises clínicas e outros exames, com PDFs e fotos (também partilhados de outras apps), valores de referência e evolução.
+- **Suplementação por treino**: pergunta após cada atividade se tomaste suplementos, registo do que foi tomado e da descrição.
+- **Lembretes livres**: janelas horárias e dias da semana, com repetição e botões «Já consumi» / «Ainda não».
 - **Plataforma**:
   - login como atleta;
-  - sincronização incremental (planos nos dois sentidos, diário, catálogo e app Saúde a subir);
-  - backup completo e restauro;
-  - estatísticas de uso sem dados de saúde.
+  - sincronização incremental (planos nos dois sentidos, diário, catálogo, tabelas tipadas e app Saúde a subir), com alterações do dashboard a descer;
+  - backup completo e restauro, fotos incluídas;
+  - gestão de acessos ao dashboard (convites e links);
+  - estatísticas de uso sem dados de saúde;
+  - ambiente de testes (configuração **Staging**, app "IronMan Testes") e área de versão em Definições.
 - **Dados do utilizador**: export, import, backup, restauro e edição do JSON dentro da app, e eliminação total.
 
 A interface está em português (pt-PT).
@@ -57,7 +59,7 @@ Ou pela linha de comandos:
 xcodebuild -project CalorieBuddy.xcodeproj -scheme CalorieBuddy -destination 'platform=iOS Simulator,name=iPhone 18 Pro' build
 ```
 
-O HealthKit e o scanner só funcionam em iOS. No macOS, essas funcionalidades ficam desativadas.
+O HealthKit, o scanner e a balança Bluetooth só funcionam em iOS. No macOS, essas funcionalidades ficam desativadas.
 
 ### Ligar à plataforma (opcional)
 
@@ -78,11 +80,13 @@ MyApp/
 │   ├── Models/       Entidades Codable (AppDatabase e todos os modelos)
 │   ├── Persistence/  DataStore (fonte de verdade) + Seeds/
 │   ├── Health/       HealthKitManager
+│   ├── Scale/        KitchenScaleManager (Bluetooth, Prozis Bit Scale)
+│   ├── Notifications/ Lembretes, avisos de validade, Live Activities
 │   ├── Platform/     SupabaseClient, PlatformSync, AppAnalytics
 │   └── Import/       Parsing de JSON gerado por IA
 ├── Features/     Um folder por área: Intro, Day, History, Health,
-│                 Library (Catalog, Recipes, Stores, Supplements, Stocks),
-│                 Plans, Settings
+│                 Library (Catalog, Recipes, Supplements), Pantry, Exams,
+│                 Reminders, Scale, Plans, Settings
 ├── Shared/       Componentes e utilitários usados por várias features
 └── Resources/    Assets, vídeo da intro, Config/*.plist
 ```

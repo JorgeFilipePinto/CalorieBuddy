@@ -25,6 +25,11 @@ struct JSONImportSheet<AdditionalFields: View>: View {
     var isReadyToImport: () -> Bool
     /// Parses/applies the pasted JSON. Throws to show a validation error instead of dismissing.
     let onImport: (String) throws -> Void
+    /// When set, the sheet asks for two photos — the article's and its nutrition label's — sends both
+    /// to the AI, and hands them to this instead of `onImport` so they stay with what's created.
+    var onImportWithPhotos: ((String, ImportedPhotos) throws -> Void)? = nil
+
+    private var keepsPhotos: Bool { onImportWithPhotos != nil }
 
     @State private var pastedText = ""
     @State private var errorMessage: String?
@@ -34,9 +39,9 @@ struct JSONImportSheet<AdditionalFields: View>: View {
     @FocusState private var isDescriptionFocused: Bool
 
     #if canImport(UIKit)
+    /// The article (the only photo when the import doesn't keep photos) and, optionally, its label.
     @State private var photo: UIImage?
-    @State private var photoItem: PhotosPickerItem?
-    @State private var showingCamera = false
+    @State private var labelPhoto: UIImage?
     @State private var showingShare = false
     #endif
 
@@ -46,16 +51,26 @@ struct JSONImportSheet<AdditionalFields: View>: View {
         pastedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    /// The share button's title: "Fotos" when both the article and its label were photographed.
+    private var shareLabel: String {
+        #if canImport(UIKit)
+        sharedImages.isEmpty ? "Enviar para a IA" : (sharedImages.count > 1 ? "Enviar Fotos para a IA" : "Enviar Foto para a IA")
+        #else
+        "Enviar para a IA"
+        #endif
+    }
+
     /// The instructions with the user's own description appended where the prompt ends
     /// ("O que quero registar:").
     private var fullText: String {
         let description = descriptionText.trimmingCharacters(in: .whitespacesAndNewlines)
         #if canImport(UIKit)
-        let hasPhoto = photo != nil
+        let photoCount = (photo == nil ? 0 : 1) + (labelPhoto == nil ? 0 : 1)
         #else
-        let hasPhoto = false
+        let photoCount = 0
         #endif
-        let ending = description.isEmpty ? (hasPhoto ? "ver a foto em anexo." : "") : description
+        let attached = photoCount > 1 ? "ver as fotos em anexo (o artigo e o rótulo)." : (photoCount == 1 ? "ver a foto em anexo." : "")
+        let ending = description.isEmpty ? attached : description
         return ending.isEmpty ? prompt.text : prompt.text + " " + ending
     }
 
@@ -77,7 +92,7 @@ struct JSONImportSheet<AdditionalFields: View>: View {
                     Button {
                         shareWithAI()
                     } label: {
-                        Label(photo == nil ? "Enviar para a IA" : "Enviar Foto para a IA", systemImage: "square.and.arrow.up")
+                        Label(shareLabel, systemImage: "square.and.arrow.up")
                     }
 
                     Button {
@@ -94,11 +109,11 @@ struct JSONImportSheet<AdditionalFields: View>: View {
                     }
 
                     #if canImport(UIKit)
-                    if photo != nil {
+                    if !sharedImages.isEmpty {
                         Button {
                             copyPhoto()
                         } label: {
-                            Label(copied == .photo ? "Copiada" : "Copiar Foto", systemImage: copied == .photo ? "checkmark" : "photo.on.rectangle")
+                            Label(copied == .photo ? "Copiadas" : (sharedImages.count > 1 ? "Copiar Fotos" : "Copiar Foto"), systemImage: copied == .photo ? "checkmark" : "photo.on.rectangle")
                         }
                     }
                     #endif
@@ -115,7 +130,7 @@ struct JSONImportSheet<AdditionalFields: View>: View {
                 } header: {
                     Text("Pedir à IA")
                 } footer: {
-                    Text("\(instructions) Tira uma foto (opcional) e descreve o que queres registar. \"Enviar Foto para a IA\" partilha a foto (escolhe o Gemini; se não aparecer, procura-o em \"Mais\") e deixa o texto copiado — cola-o na conversa. \"Copiar Texto e Abrir Gemini\" abre o Gemini com o texto copiado; anexa lá a foto. Depois cola aqui a resposta.")
+                    Text("\(instructions) \(keepsPhotos ? "Tira uma foto do artigo e outra do rótulo (opcionais): vão para a IA e, se a resposta tiver um só alimento, ficam logo associadas a ele quando for criado. Descreve o que queres registar." : "Tira uma foto (opcional) e descreve o que queres registar.") \"\(shareLabel)\" partilha as fotos (escolhe o Gemini; se não aparecer, procura-o em \"Mais\") e deixa o texto copiado — cola-o na conversa. \"Copiar Texto e Abrir Gemini\" abre o Gemini com o texto copiado; anexa lá as fotos. Depois cola aqui a resposta.")
                 }
 
                 Section {
@@ -170,24 +185,11 @@ struct JSONImportSheet<AdditionalFields: View>: View {
                 }
             }
             #if canImport(UIKit)
-            .onChange(of: photoItem) {
-                guard let photoItem else { return }
-                Task {
-                    if let data = try? await photoItem.loadTransferable(type: Data.self), let image = UIImage(data: data) {
-                        photo = image.downscaled()
-                    }
-                    self.photoItem = nil
-                }
-            }
-            .fullScreenCover(isPresented: $showingCamera) {
-                CameraPicker { image in photo = image.downscaled() }
-                    .ignoresSafeArea()
-            }
             .sheet(isPresented: $showingShare) {
                 // One kind of item only: the share sheet hides any app whose extension doesn't
                 // accept *every* item, and AI apps (Gemini included) tend not to take an image and
                 // a long text together. The text is on the clipboard already (see `shareWithAI`).
-                ActivityShareSheet(items: [photo ?? fullText as Any])
+                ActivityShareSheet(items: sharedImages.isEmpty ? [fullText as Any] : sharedImages as [Any])
                     .presentationDetents([.medium, .large])
                     .ignoresSafeArea()
             }
@@ -207,44 +209,21 @@ struct JSONImportSheet<AdditionalFields: View>: View {
     }
 
     #if canImport(UIKit)
-    /// Take a photo (when there's a camera) or pick one from the library, with a preview once set.
+    /// The photos taken so far, in the order they are sent (article first).
+    private var sharedImages: [UIImage] { [photo, labelPhoto].compactMap { $0 } }
+
+    /// One photo area, or — when the import keeps photos — one for the article and one for its label.
     @ViewBuilder
     private var photoControls: some View {
-        if let photo {
-            HStack {
-                Image(uiImage: photo)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(width: 72, height: 72)
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                Text("Foto pronta a enviar")
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button("Remover", role: .destructive) { self.photo = nil }
-                    .buttonStyle(.borderless)
-            }
-        }
-        HStack(spacing: 12) {
-            if CameraPicker.isAvailable {
-                Button {
-                    showingCamera = true
-                } label: {
-                    Label("Tirar Foto", systemImage: "camera")
-                        .labelStyle(.titleAndIcon)
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-            }
-            PhotosPicker(selection: $photoItem, matching: .images) {
-                Label("Galeria", systemImage: "photo")
-                    .labelStyle(.titleAndIcon)
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.bordered)
+        if keepsPhotos {
+            ImportPhotoSlot(title: "Foto do artigo", readyText: "Foto do artigo pronta", image: $photo)
+            ImportPhotoSlot(title: "Foto do rótulo", readyText: "Foto do rótulo pronta", image: $labelPhoto)
+        } else {
+            ImportPhotoSlot(title: nil, readyText: "Foto pronta a enviar", image: $photo)
         }
     }
 
-    /// Opens the share sheet with the photo (or the text, when there's no photo), and puts the
+    /// Opens the share sheet with the photos (or the text, when there are none), and puts the
     /// text on the clipboard so it can be pasted into the AI's chat next to the shared photo.
     private func shareWithAI() {
         UIPasteboard.general.string = fullText
@@ -264,8 +243,8 @@ struct JSONImportSheet<AdditionalFields: View>: View {
     }
 
     private func copyPhoto() {
-        guard let photo else { return }
-        UIPasteboard.general.image = photo
+        guard !sharedImages.isEmpty else { return }
+        UIPasteboard.general.images = sharedImages
         flashCopied(.photo)
     }
     #endif
@@ -277,6 +256,18 @@ struct JSONImportSheet<AdditionalFields: View>: View {
         flashCopied(.text)
     }
 
+    /// What was photographed, as JPEG data (nothing on a Mac, where there are no photo controls).
+    private var importedPhotos: ImportedPhotos {
+        #if canImport(UIKit)
+        func jpeg(_ image: UIImage?) -> Data? {
+            image?.downscaled(maxDimension: PhotoStore.maxDimension).jpegData(compressionQuality: 0.8)
+        }
+        return ImportedPhotos(product: jpeg(photo), label: jpeg(labelPhoto))
+        #else
+        return ImportedPhotos()
+        #endif
+    }
+
     private func flashCopied(_ target: CopyTarget) {
         withAnimation { copied = target }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
@@ -286,7 +277,11 @@ struct JSONImportSheet<AdditionalFields: View>: View {
 
     private func attemptImport() {
         do {
-            try onImport(pastedText)
+            if let onImportWithPhotos {
+                try onImportWithPhotos(pastedText, importedPhotos)
+            } else {
+                try onImport(pastedText)
+            }
             dismiss()
         } catch {
             errorMessage = error.localizedDescription
@@ -312,6 +307,93 @@ extension JSONImportSheet where AdditionalFields == EmptyView {
         )
     }
 }
+
+extension JSONImportSheet where AdditionalFields == EmptyView {
+    /// For foods: the sheet also takes a photo of the article and one of its label, which `onImport`
+    /// receives (as JPEG data) to keep with the food it creates.
+    init(
+        title: String,
+        prompt: AIImportPrompt,
+        instructions: String,
+        onImportKeepingPhotos: @escaping (String, ImportedPhotos) throws -> Void
+    ) {
+        self.init(
+            title: title,
+            prompt: prompt,
+            instructions: instructions,
+            additionalFields: { EmptyView() },
+            isReadyToImport: { true },
+            onImport: { _ in },
+            onImportWithPhotos: onImportKeepingPhotos
+        )
+    }
+}
+
+#if canImport(UIKit)
+/// One photo to take (when there's a camera) or pick from the library, with a preview and "Remover"
+/// once set. The image only lives in the sheet until the import decides what to do with it.
+private struct ImportPhotoSlot: View {
+    let title: String?
+    let readyText: String
+    @Binding var image: UIImage?
+
+    @State private var item: PhotosPickerItem?
+    @State private var showingCamera = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let title {
+                Text(title).font(.subheadline.weight(.medium))
+            }
+            if let image {
+                HStack {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: 72, height: 72)
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    Text(readyText)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Remover", role: .destructive) { self.image = nil }
+                        .buttonStyle(.borderless)
+                }
+            }
+            HStack(spacing: 12) {
+                if CameraPicker.isAvailable {
+                    Button {
+                        showingCamera = true
+                    } label: {
+                        Label(image == nil ? "Tirar Foto" : "Câmara", systemImage: "camera")
+                            .labelStyle(.titleAndIcon)
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                }
+                PhotosPicker(selection: $item, matching: .images) {
+                    Label("Galeria", systemImage: "photo")
+                        .labelStyle(.titleAndIcon)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+        .onChange(of: item) {
+            guard let item else { return }
+            Task {
+                if let data = try? await item.loadTransferable(type: Data.self), let picked = UIImage(data: data) {
+                    image = picked.downscaled()
+                }
+                self.item = nil
+            }
+        }
+        .fullScreenCover(isPresented: $showingCamera) {
+            CameraPicker { picked in image = picked.downscaled() }
+                .ignoresSafeArea()
+        }
+    }
+}
+#endif
 
 #Preview {
     JSONImportSheet(

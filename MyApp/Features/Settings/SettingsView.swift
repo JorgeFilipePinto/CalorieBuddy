@@ -19,6 +19,18 @@ struct SettingsView: View {
 
             Section {
                 NavigationLink {
+                    RemindersListView()
+                } label: {
+                    SettingsRowLabel(title: "Lembretes", systemImage: "bell.badge", color: .pink)
+                }
+            } header: {
+                Text("Lembretes")
+            } footer: {
+                Text("Alertas para lembrar de consumir suplementos ou alimentos, em janelas horárias e dias da semana à tua escolha, que deixam de tocar quando confirmas.")
+            }
+
+            Section {
+                NavigationLink {
                     StoresListView()
                 } label: {
                     SettingsRowLabel(title: "Lojas", systemImage: "storefront", color: .orange)
@@ -61,6 +73,18 @@ struct SettingsView: View {
                 Text("Dados")
             } footer: {
                 Text("Exportar, importar ou restaurar a base de dados, editar o JSON e eliminar todos os dados.")
+            }
+
+            Section {
+                LabeledContent("Versão", value: AppVersion.versionAndBuild)
+                LabeledContent("Ambiente", value: AppVersion.environment)
+                if let host = AppVersion.platformHost {
+                    LabeledContent("Plataforma", value: host)
+                }
+            } header: {
+                Text("Versão")
+            } footer: {
+                Text("A versão é a da tag da release. Indica-a quando algo não estiver como esperado.")
             }
         }
         .navigationTitle("Definições")

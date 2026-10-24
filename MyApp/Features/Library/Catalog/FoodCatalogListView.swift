@@ -3,15 +3,19 @@ import SwiftUI
 /// Manages the reusable food catalog — items that can be scanned, quick-logged, or combined
 /// into recipes.
 struct FoodCatalogListView: View {
+    @Environment(PlatformSyncManager.self) private var platform
     @Environment(DataStore.self) private var store
 
     @State private var showingAddFoodItem = false
     @State private var showingJSONImport = false
     @State private var foodItemToEdit: FoodItem?
     @State private var searchText = ""
+    @State private var showingBarcodeSearch = false
     @State private var sortOrder: ItemSortOrder = .name
     @State private var showingCategories = false
     @AppStorage("CalorieBuddy.catalogGroupedByCategory") private var groupedByCategory = true
+    /// The categories left open (ids, comma-separated), remembered between visits; every category starts closed.
+    @AppStorage("CalorieBuddy.catalogOpenCategories") private var openCategoriesRaw = ""
     /// Multi-select mode: rows toggle a check mark instead of opening the editor.
     @State private var isSelecting = false
     @State private var selectedIDs: Set<UUID> = []
@@ -38,6 +42,49 @@ struct FoodCatalogListView: View {
         let rest = others.filter { $0.categoryID.map { !known.contains($0) } ?? true }
         if !rest.isEmpty { groups.append(("none", "Sem categoria", rest)) }
         return groups
+    }
+
+    private var openCategories: Set<String> {
+        Set(openCategoriesRaw.split(separator: ",").map(String.init))
+    }
+
+    /// Searching opens every category (so no match is hidden); otherwise the ones the user left open.
+    private func isExpanded(_ id: String) -> Bool {
+        !searchText.isEmpty || openCategories.contains(id)
+    }
+
+    private func toggleCategory(_ id: String) {
+        var open = openCategories
+        if open.contains(id) { open.remove(id) } else { open.insert(id) }
+        openCategoriesRaw = open.sorted().joined(separator: ",")
+        Haptics.light()
+    }
+
+    private func setAllCategories(open: Bool) {
+        openCategoriesRaw = open ? categoryGroups.map(\.id).sorted().joined(separator: ",") : ""
+        Haptics.light()
+    }
+
+    /// A category's header: its name, how many foods, and a chevron — tap to open or close it.
+    private func categoryHeader(_ group: (id: String, title: String, items: [FoodItem])) -> some View {
+        let expanded = isExpanded(group.id)
+        return Button {
+            toggleCategory(group.id)
+        } label: {
+            HStack {
+                Text("\(group.title) (\(group.items.count))")
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .rotationEffect(.degrees(expanded ? 90 : 0))
+                    .animation(.easeInOut(duration: 0.2), value: expanded)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!searchText.isEmpty)
+        .accessibilityAddTraits(.isHeader)
+        .accessibilityValue(expanded ? "Aberta" : "Fechada")
     }
 
     private var showsAlphabetIndex: Bool { !groupedByCategory && sortOrder == .name && !alphabeticalGroups.isEmpty }
@@ -70,11 +117,15 @@ struct FoodCatalogListView: View {
                                 .foregroundStyle(.secondary)
                         } else if groupedByCategory {
                             ForEach(categoryGroups, id: \.id) { group in
-                                Section("\(group.title) (\(group.items.count))") {
-                                    // Each food with its preparations (grelhado, cozido…) under it.
-                                    ForEach(group.items.withPreparationsUnderBase(), id: \.item.id) { entry in
-                                        row(for: entry.item, nested: entry.isNested)
+                                Section {
+                                    if isExpanded(group.id) {
+                                        // Each food with its preparations (grelhado, cozido…) under it.
+                                        ForEach(group.items.withPreparationsUnderBase(), id: \.item.id) { entry in
+                                            row(for: entry.item, nested: entry.isNested)
+                                        }
                                     }
+                                } header: {
+                                    categoryHeader(group)
                                 }
                             }
                         } else if sortOrder == .name {
@@ -97,6 +148,7 @@ struct FoodCatalogListView: View {
                 }
                 .refreshable {
                     Haptics.light()
+                    await platform.refresh()
                     store.reloadFromDisk()
                 }
             }
@@ -126,7 +178,7 @@ struct FoodCatalogListView: View {
         }
         .navigationTitle(isSelecting ? "\(selectedIDs.count) Selecionados" : "Catálogo de Alimentos")
         .trackScreen("Catálogo de Alimentos")
-        .searchable(text: $searchText, prompt: "Procurar por nome")
+        .searchable(text: $searchText, prompt: "Procurar por nome, marca ou código de barras")
         .toolbar {
             if isSelecting {
                 ToolbarItem(placement: .barLeading) {
@@ -151,6 +203,14 @@ struct FoodCatalogListView: View {
                 .pickerStyle(.menu)
             }
             ToolbarItem(placement: .barTrailing) {
+                Button {
+                    showingBarcodeSearch = true
+                } label: {
+                    Label("Procurar por Código de Barras", systemImage: "barcode.viewfinder")
+                }
+                .disabled(store.foodItems.isEmpty)
+            }
+            ToolbarItem(placement: .barTrailing) {
                 Button("Selecionar") { isSelecting = true }
                     .disabled(store.foodItems.isEmpty)
             }
@@ -163,6 +223,18 @@ struct FoodCatalogListView: View {
                     }
                     Toggle(isOn: $groupedByCategory) {
                         Label("Agrupar por Categoria", systemImage: "square.grid.2x2")
+                    }
+                    if groupedByCategory {
+                        Button {
+                            setAllCategories(open: true)
+                        } label: {
+                            Label("Expandir Categorias", systemImage: "chevron.down.circle")
+                        }
+                        Button {
+                            setAllCategories(open: false)
+                        } label: {
+                            Label("Recolher Categorias", systemImage: "chevron.up.circle")
+                        }
                     }
                     Button {
                         showingCategories = true
@@ -187,20 +259,25 @@ struct FoodCatalogListView: View {
             JSONImportSheet(
                 title: "Importar Alimentos",
                 prompt: AIJSONImport.foodPrompt(categories: store.foodCategories.map(\.name)),
-                instructions: "Útil quando não há rótulo à mão. Todos os alimentos da resposta são adicionados ao catálogo; um alimento com o mesmo nome de um já existente é mantido como está."
-            ) { json in
-                let payloads = try AIJSONImport.decodeFoodItems(from: json)
-                guard !payloads.isEmpty else { throw AIImportError.empty }
-                for payload in payloads {
-                    store.catalogFood(for: payload)
+                instructions: "Útil quando não há rótulo à mão. Todos os alimentos da resposta são adicionados ao catálogo; um alimento com o mesmo nome de um já existente é mantido como está.",
+                onImportKeepingPhotos: { json, photos in
+                    let payloads = try AIJSONImport.decodeFoodItems(from: json)
+                    guard !payloads.isEmpty else { throw AIImportError.empty }
+                    store.catalogFoods(for: payloads, photos: photos)
                 }
-            }
+            )
         }
         .sheet(isPresented: $showingCategories) {
             NavigationStack { FoodCategoriesView() }
         }
         .sheet(item: $foodItemToEdit) { item in
             FoodItemEditorView(itemToEdit: item)
+        }
+        .sheet(isPresented: $showingBarcodeSearch) {
+            // The scanned code goes into the search box: the list shows the food(s) with that barcode.
+            BarcodeScannerView { code in
+                searchText = code
+            }
         }
     }
 
@@ -230,6 +307,13 @@ struct FoodCatalogListView: View {
                             .font(nested ? .subheadline : .body)
                         if item.isFavorite {
                             Image(systemName: "star.fill").foregroundStyle(.yellow).font(.caption)
+                        }
+                        if item.supplementID != nil {
+                            Text("Suplemento")
+                                .font(.caption2)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1)
+                                .background(.quaternary, in: Capsule())
                         }
                     }
                     HStack(spacing: 4) {
@@ -267,7 +351,8 @@ struct FoodCatalogListView: View {
             }
         }
         .swipeActions(edge: .trailing) {
-            if !isSelecting {
+            // A supplement's mirror food goes with the supplement, not on its own.
+            if !isSelecting && item.supplementID == nil {
                 Button(role: .destructive) {
                     store.deleteFoodItem(item)
                 } label: {
