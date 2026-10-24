@@ -296,6 +296,12 @@ final class HealthKitManager {
     /// Callers that need a specific range (Histórico's pagination, a particular day in DayView,
     /// the Evolução chart's period picker) should always pass `days` explicitly — this default
     /// only covers simple "just refresh what I already had" calls like after logging water.
+    /// Reads just the latest height (the sync keeps it in the settings for the platform).
+    func refreshHeight() async {
+        guard isSupported else { return }
+        latestHeightMeters = await fetchQuantityHistory(for: heightType, unit: .meter(), limit: 1).first?.value
+    }
+
     func refresh(days: Int = 30) async {
         guard isSupported else { return }
         let historyLimit = max(30, days)
@@ -757,6 +763,7 @@ final class HealthKitManager {
     #else
     var isSupported: Bool { false }
     func requestAuthorization() async {}
+    func refreshHeight() async {}
     func refresh(days: Int = 30) async {}
     func logWater(liters: Double) async {}
     @discardableResult

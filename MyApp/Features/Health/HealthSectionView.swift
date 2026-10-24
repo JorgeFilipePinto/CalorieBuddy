@@ -88,6 +88,11 @@ struct HealthSectionView: View {
     private var weightSection: some View {
         Section {
             currentWeightCard
+            NavigationLink {
+                WeightView()
+            } label: {
+                Label("Peso e Composição", systemImage: "chart.xyaxis.line")
+            }
         } header: {
             Text("Peso")
         }
@@ -230,7 +235,7 @@ struct HealthSectionView: View {
     }
 }
 
-private struct LogWeightView: View {
+struct LogWeightView: View {
     @Environment(HealthKitManager.self) private var healthKit
     @Environment(\.dismiss) private var dismiss
 

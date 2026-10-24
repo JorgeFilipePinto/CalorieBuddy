@@ -1063,6 +1063,10 @@ struct UserSettings: Codable, Equatable {
     var dailyWaterGoalML: Int?
     /// How many days before a stocked food expires the app starts warning (`nil` = 3).
     var expiryWarningDays: Int?
+    /// The body weight the athlete is aiming for, in kg (`nil` = none set).
+    var goalWeightKG: Double?
+    /// The height in Apple Health, kept here so the platform (BMI on the dashboard) has it too.
+    var heightMeters: Double?
 
     static let `default` = UserSettings(
         dailyCalorieGoal: 2000,
