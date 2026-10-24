@@ -908,6 +908,14 @@ final class DataStore {
         persistActive()
     }
 
+    /// Keeps Apple Health's height in the settings (they are backed up to the platform); a change
+    /// made here comes from Health, not from the user, so it doesn't start a sync of its own.
+    func setHeightMeters(_ meters: Double?) {
+        guard let meters, meters > 0, abs((settings.heightMeters ?? 0) - meters) > 0.001 else { return }
+        settings.heightMeters = meters
+        persistActive(countingChange: false)
+    }
+
     func updateSettings(_ newSettings: UserSettings) {
         settings = newSettings
         persistActive()

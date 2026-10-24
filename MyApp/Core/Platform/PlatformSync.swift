@@ -95,6 +95,8 @@ final class PlatformSyncManager {
             // What was changed on the dashboard comes in first, so the push below doesn't undo it.
             let pulled = try await pullDocuments(store: store, state: &state, warnings: &newWarnings)
             state.save()
+            await healthKit.refreshHeight()
+            store.setHeightMeters(healthKit.latestHeightMeters)
             let database = store.databaseSnapshot()
             let documents = try await pushDocuments(database, state: &state,
                                                     replacingServerBackup: replacingServerBackup)
