@@ -217,7 +217,7 @@ struct FoodAmountsView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            if scale.isConnected, let grams = scale.grams, let value = scaleAmount(grams, in: food.unit) {
+            if scale.isConnected, let grams = scale.grams, let value = scaleAmount(grams, for: food) {
                 Button {
                     amounts[food.id] = RecipeIngredientEditorView.number(value)
                 } label: {
@@ -245,14 +245,10 @@ struct FoodAmountsView: View {
         store.foodItems.first { $0.id == id }
     }
 
-    /// The scale's grams in the food's unit (1 g = 1 ml); nothing for foods counted in units.
-    private func scaleAmount(_ grams: Int, in unit: MeasurementUnit) -> Double? {
-        guard grams > 0 else { return nil }
-        switch unit {
-        case .gram, .milliliter: return Double(grams)
-        case .kilogram, .liter: return Double(grams) / 1000
-        case .unit: return nil
-        }
+    /// The scale's grams in the food's unit (a liquid through its density); nothing for foods counted in units.
+    private func scaleAmount(_ grams: Int, for food: FoodItem) -> Double? {
+        guard grams > 0, food.unit != .unit else { return nil }
+        return food.amountInUnit(forGrams: Double(grams))
     }
 }
 

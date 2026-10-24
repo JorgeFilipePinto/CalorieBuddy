@@ -56,6 +56,9 @@ struct WeightGauge: View {
     /// What every tare so far zeroed away.
     let tare: Int
     let isLive: Bool
+    /// Weight was added with no food chosen: pulses orange and asks for one.
+    var needsFood = false
+    @State private var pulse = false
 
     static let maxGrams = 2000.0
     private let sweep = 1.0  // the whole circle, starting at the top
@@ -71,13 +74,25 @@ struct WeightGauge: View {
             arc(from: 0, to: redEnd, color: .red)
             arc(from: redEnd, to: greenEnd, color: .green)
 
+            if needsFood {
+                Circle()
+                    .stroke(Color.orange, lineWidth: 6)
+                    .opacity(pulse ? 1 : 0.2)
+            }
+
             VStack(spacing: 4) {
                 Text(isLive ? "\(net)" : "—")
                     .font(.system(size: 72, weight: .bold, design: .rounded).monospacedDigit())
                     .minimumScaleFactor(0.5)
                     .contentTransition(.numericText())
-                Text("gramas")
-                    .foregroundStyle(.secondary)
+                if needsFood {
+                    Label("Escolhe o alimento", systemImage: "exclamationmark.triangle.fill")
+                        .font(.subheadline.bold())
+                        .foregroundStyle(.orange)
+                } else {
+                    Text("gramas")
+                        .foregroundStyle(.secondary)
+                }
                 if tare > 0 {
                     Label("Tara \(tare) g", systemImage: "minus.circle.fill")
                         .font(.subheadline.bold())
@@ -101,6 +116,13 @@ struct WeightGauge: View {
         .aspectRatio(1, contentMode: .fit)
         .animation(.easeOut(duration: 0.25), value: net)
         .animation(.easeOut(duration: 0.25), value: tare)
+        .onChange(of: needsFood) { _, needs in
+            if needs {
+                withAnimation(.easeInOut(duration: 0.7).repeatForever(autoreverses: true)) { pulse = true }
+            } else {
+                withAnimation(.default) { pulse = false }
+            }
+        }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Peso")
         .accessibilityValue("\(net) gramas, tara \(tare) gramas")

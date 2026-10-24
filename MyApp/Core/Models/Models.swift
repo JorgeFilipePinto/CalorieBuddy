@@ -440,6 +440,11 @@ struct FoodItem: Identifiable, Codable, Hashable, Doseable, Favoritable {
     /// Set on the mirror food of a supplement used as food (same id as the supplement): its label
     /// comes from the supplement and it is edited there.
     var supplementID: UUID?
+    /// SF Symbol shown for it when weighing a meal (`FoodIcon`); `nil` = the default icon.
+    var iconName: String?
+    /// Grams per millilitre, for a food measured in ml/L (water 1, milk 1.03, olive oil 0.92). `nil` = not
+    /// stated: `FoodItem.defaultDensity` is used.
+    var densityGramsPerMl: Double?
 
     init(
         id: UUID = UUID(),
@@ -484,7 +489,7 @@ struct FoodItem: Identifiable, Codable, Hashable, Doseable, Favoritable {
     private enum CodingKeys: String, CodingKey {
         case id, name, brand, unit, doseSize, nutritionBasis, calories, protein, carbs, fat,
              minerals, vitamins, barcodes, prices, isFavorite, createdAt, photoID, categoryID, labelPhotoIDs,
-             saturatedFat, sugars, fiber, salt, micronutrients, cookingWeightChange, baseFoodID, preparation, supplementID
+             saturatedFat, sugars, fiber, salt, micronutrients, cookingWeightChange, baseFoodID, preparation, supplementID, iconName, densityGramsPerMl
     }
 
     /// Only for reading the old singular `barcode` field from databases saved before this was
@@ -537,6 +542,8 @@ struct FoodItem: Identifiable, Codable, Hashable, Doseable, Favoritable {
         // A preparation this version doesn't know is read as "not stated".
         preparation = (try? container.decodeIfPresent(FoodPreparation.self, forKey: .preparation)) ?? nil
         supplementID = try container.decodeIfPresent(UUID.self, forKey: .supplementID)
+        iconName = try container.decodeIfPresent(String.self, forKey: .iconName)
+        densityGramsPerMl = try container.decodeIfPresent(Double.self, forKey: .densityGramsPerMl)
     }
 
     /// Moves the free-text `values` the fixed list knows into `micros` (in their own unit) and
@@ -599,6 +606,37 @@ enum Macro: String, CaseIterable {
 }
 
 extension FoodItem {
+    /// Average density of the liquids in a kitchen (water 1, milk 1.03, juice 1.04, oil 0.92), used
+    /// when a food in ml/L doesn't state its own.
+    static let defaultDensity = 1.0
+
+    /// Measured in ml or L (as opposed to grams or units).
+    var isLiquid: Bool { unit.baseUnit == .milliliter }
+
+    /// Its own density, or the default.
+    var effectiveDensity: Double {
+        if let density = densityGramsPerMl, density > 0 { return density }
+        return Self.defaultDensity
+    }
+
+    /// A liquid with no density of its own: weighing it relies on the default.
+    var lacksDensity: Bool { isLiquid && !(densityGramsPerMl.map { $0 > 0 } ?? false) }
+
+    /// What a scale reading of `grams` is in the food's base unit (ml for a liquid, via its density).
+    func baseAmount(forGrams grams: Double) -> Double {
+        isLiquid ? grams / effectiveDensity : grams
+    }
+
+    /// The amount in the food's own unit (g, kg, ml, L) for a scale reading of `grams`.
+    func amountInUnit(forGrams grams: Double) -> Double {
+        baseAmount(forGrams: grams) / unit.baseMultiplier
+    }
+
+    /// Doses of this food in a scale reading of `grams`.
+    func quantity(forGrams grams: Double) -> Double {
+        baseDoseAmount > 0 ? baseAmount(forGrams: grams) / baseDoseAmount : 0
+    }
+
     /// Amount of `macro` in `quantity` doses, or `nil` if the food doesn't state it.
     func amount(of macro: Macro, quantity: Double) -> Double? {
         switch macro {
